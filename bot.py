@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import logging
@@ -16,7 +17,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8221723889:AAFfhyH1Umg2ti0gGJn4UjWXW9sbVqHXx4U"
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 WORDS_FILE = "words_dictionary.json"
 STATS_FILE = "player_stats.json"
 
