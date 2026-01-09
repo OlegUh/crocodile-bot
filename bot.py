@@ -792,30 +792,8 @@ async def main():
     logger.info("Загрузка статистики...")
     load_stats()
     
-    logger.info("Запуск веб-сервера...")
-    await run_web_server()
-    
     logger.info("Запуск бота...")
     await dp.start_polling(bot)
-    
-from aiohttp import web
 
-async def health_check(request):
-    """Простой health check для Render"""
-    return web.Response(text="Bot is running!")
-
-async def run_web_server():
-    """Запуск веб-сервера"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Web server started on port {port}")
-    
 if __name__ == "__main__":
     asyncio.run(main())
-
-
