@@ -792,6 +792,9 @@ async def main():
     logger.info("Загрузка статистики...")
     load_stats()
     
+    logger.info("Запуск веб-сервера...")
+    await run_web_server()
+    
     logger.info("Запуск бота...")
     await dp.start_polling(bot)
     
@@ -814,4 +817,5 @@ async def run_web_server():
     
 if __name__ == "__main__":
     asyncio.run(main())
+
 
