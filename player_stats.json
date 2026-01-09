@@ -1,0 +1,20 @@
+{
+  "-1001897811065": {
+    "1630073668": {
+      "words_explained": 0,
+      "words_guessed": 2,
+      "total_explain_time": 0.0,
+      "total_guess_time": 37.614209,
+      "fastest_explain": null,
+      "fastest_guess": 11.161765
+    },
+    "393069167": {
+      "words_explained": 2,
+      "words_guessed": 0,
+      "total_explain_time": 37.614209,
+      "total_guess_time": 0.0,
+      "fastest_explain": 11.161765,
+      "fastest_guess": null
+    }
+  }
+}
