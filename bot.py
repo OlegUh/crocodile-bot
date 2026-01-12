@@ -37,7 +37,31 @@ db_pool = None
 async def init_db():
     """Инициализация базы данных"""
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    
+    # Railway PostgreSQL требует SSL, но с verify=False
+    try:
+        db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            ssl='require',  # Для Railway
+            min_size=1,
+            max_size=10,
+            command_timeout=60
+        )
+        logger.info("Подключение к БД установлено")
+    except Exception as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        # Пробуем без SSL (для локальной разработки)
+        try:
+            db_pool = await asyncpg.create_pool(
+                DATABASE_URL,
+                min_size=1,
+                max_size=10,
+                command_timeout=60
+            )
+            logger.info("Подключение к БД установлено (без SSL)")
+        except Exception as e2:
+            logger.error(f"Критическая ошибка БД: {e2}")
+            raise
     
     # Создаём таблицу статистики, если её нет
     async with db_pool.acquire() as conn:
@@ -899,4 +923,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
