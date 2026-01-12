@@ -34,6 +34,7 @@ WARNING_TIME = 30
 # Глобальный пул подключений к БД
 db_pool = None
 
+
 async def init_db():
     """Инициализация базы данных"""
     global db_pool
@@ -71,7 +72,7 @@ async def init_db():
         logger.error(f"❌ Ошибка подключения к БД: {e}")
         logger.error(f"DATABASE_URL присутствует: {bool(DATABASE_URL)}")
         raise
-
+        
 async def load_player_stats(chat_id: int, user_id: int) -> Dict:
     """Загрузить статистику игрока из БД"""
     async with db_pool.acquire() as conn:
@@ -915,6 +916,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
