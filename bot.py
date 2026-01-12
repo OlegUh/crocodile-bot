@@ -38,51 +38,39 @@ async def init_db():
     """Инициализация базы данных"""
     global db_pool
     
-    # Отладочный вывод (скрываем пароль)
-    db_url_safe = DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'URL не распознан'
-    logger.info(f"Попытка подключения к БД: ...@{db_url_safe}")
+    logger.info(f"Подключение к БД...")
     
-    # Railway PostgreSQL требует SSL, но с verify=False
     try:
+        # Railway автоматически предоставляет правильный DATABASE_URL
         db_pool = await asyncpg.create_pool(
             DATABASE_URL,
-            ssl='require',  # Для Railway
             min_size=1,
             max_size=10,
             command_timeout=60
         )
-        logger.info("Подключение к БД установлено (с SSL)")
+        logger.info("✅ Подключение к БД установлено")
+        
+        # Создаём таблицу статистики, если её нет
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS player_stats (
+                    chat_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    words_explained INTEGER DEFAULT 0,
+                    words_guessed INTEGER DEFAULT 0,
+                    total_explain_time FLOAT DEFAULT 0.0,
+                    total_guess_time FLOAT DEFAULT 0.0,
+                    fastest_explain FLOAT,
+                    fastest_guess FLOAT,
+                    PRIMARY KEY (chat_id, user_id)
+                )
+            ''')
+        logger.info("✅ Таблица player_stats готова")
+        
     except Exception as e:
-        logger.error(f"Ошибка подключения к БД: {e}")
-        # Пробуем без SSL (для локальной разработки)
-        try:
-            db_pool = await asyncpg.create_pool(
-                DATABASE_URL,
-                min_size=1,
-                max_size=10,
-                command_timeout=60
-            )
-            logger.info("Подключение к БД установлено (без SSL)")
-        except Exception as e2:
-            logger.error(f"Критическая ошибка БД: {e2}")
-            raise
-    
-    # Создаём таблицу статистики, если её нет
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS player_stats (
-                chat_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                words_explained INTEGER DEFAULT 0,
-                words_guessed INTEGER DEFAULT 0,
-                total_explain_time FLOAT DEFAULT 0.0,
-                total_guess_time FLOAT DEFAULT 0.0,
-                fastest_explain FLOAT,
-                fastest_guess FLOAT,
-                PRIMARY KEY (chat_id, user_id)
-            )
-        ''')
-    logger.info("База данных инициализирована")
+        logger.error(f"❌ Ошибка подключения к БД: {e}")
+        logger.error(f"DATABASE_URL присутствует: {bool(DATABASE_URL)}")
+        raise
 
 async def load_player_stats(chat_id: int, user_id: int) -> Dict:
     """Загрузить статистику игрока из БД"""
@@ -927,6 +915,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
