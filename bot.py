@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Optional
 from random import choice
 from datetime import datetime
-import asyncpg
+import asyncpg  # Добавьте в requirements.txt
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Получаем токен и DATABASE_URL из переменных окружения Railway
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")  # Railway автоматически создаст эту переменную
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден!")
@@ -55,63 +55,6 @@ async def init_db():
             )
         ''')
     logger.info("База данных инициализирована")
-
-class PlayerStats:
-    def __init__(self, data: Dict = None):
-        if data:
-            self.words_explained = data.get('words_explained', 0)
-            self.words_guessed = data.get('words_guessed', 0)
-            self.total_explain_time = data.get('total_explain_time', 0.0)
-            self.total_guess_time = data.get('total_guess_time', 0.0)
-            self.fastest_explain = data.get('fastest_explain')
-            self.fastest_guess = data.get('fastest_guess')
-        else:
-            self.words_explained = 0
-            self.words_guessed = 0
-            self.total_explain_time = 0.0
-            self.total_guess_time = 0.0
-            self.fastest_explain = None
-            self.fastest_guess = None
-    
-    def avg_explain_time(self) -> float:
-        """Средняя скорость объяснения"""
-        if self.words_explained == 0:
-            return 0.0
-        return self.total_explain_time / self.words_explained
-    
-    def avg_guess_time(self) -> float:
-        """Средняя скорость угадывания"""
-        if self.words_guessed == 0:
-            return 0.0
-        return self.total_guess_time / self.words_guessed
-    
-    def to_dict(self):
-        return {
-            'words_explained': self.words_explained,
-            'words_guessed': self.words_guessed,
-            'total_explain_time': self.total_explain_time,
-            'total_guess_time': self.total_guess_time,
-            'fastest_explain': self.fastest_explain,
-            'fastest_guess': self.fastest_guess
-        }
-    
-    @staticmethod
-    def from_dict(data):
-        return PlayerStats(data)
-
-class GameState:
-    def __init__(self):
-        self.leader_id: Optional[int] = None
-        self.current_word: Optional[str] = None
-        self.previous_word: Optional[str] = None
-        self.is_game_active: bool = False
-        self.word_guessed: bool = False
-        self.round_start_time: Optional[datetime] = None
-        self.timer_task: Optional[asyncio.Task] = None
-        self.warning_sent: bool = False
-
-games: Dict[int, GameState] = {}
-words_list = []
 
 async def load_player_stats(chat_id: int, user_id: int) -> Dict:
     """Загрузить статистику игрока из БД"""
@@ -161,6 +104,77 @@ async def save_player_stats(chat_id: int, user_id: int, stats: Dict):
             stats['total_explain_time'], stats['total_guess_time'],
             stats['fastest_explain'], stats['fastest_guess']
         )
+
+async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
+    """Получить статистику всех игроков в чате"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            'SELECT * FROM player_stats WHERE chat_id = $1',
+            chat_id
+        )
+        
+        result = {}
+        for row in rows:
+            result[row['user_id']] = {
+                'words_explained': row['words_explained'],
+                'words_guessed': row['words_guessed'],
+                'total_explain_time': row['total_explain_time'],
+                'total_guess_time': row['total_guess_time'],
+                'fastest_explain': row['fastest_explain'],
+                'fastest_guess': row['fastest_guess']
+            }
+        return result
+
+class PlayerStats:
+    def __init__(self, data: Dict = None):
+        if data:
+            self.words_explained = data.get('words_explained', 0)
+            self.words_guessed = data.get('words_guessed', 0)
+            self.total_explain_time = data.get('total_explain_time', 0.0)
+            self.total_guess_time = data.get('total_guess_time', 0.0)
+            self.fastest_explain = data.get('fastest_explain')
+            self.fastest_guess = data.get('fastest_guess')
+        else:
+            self.words_explained = 0
+            self.words_guessed = 0
+            self.total_explain_time = 0.0
+            self.total_guess_time = 0.0
+            self.fastest_explain = None
+            self.fastest_guess = None
+    
+    def avg_explain_time(self) -> float:
+        if self.words_explained == 0:
+            return 0.0
+        return self.total_explain_time / self.words_explained
+    
+    def avg_guess_time(self) -> float:
+        if self.words_guessed == 0:
+            return 0.0
+        return self.total_guess_time / self.words_guessed
+    
+    def to_dict(self):
+        return {
+            'words_explained': self.words_explained,
+            'words_guessed': self.words_guessed,
+            'total_explain_time': self.total_explain_time,
+            'total_guess_time': self.total_guess_time,
+            'fastest_explain': self.fastest_explain,
+            'fastest_guess': self.fastest_guess
+        }
+
+class GameState:
+    def __init__(self):
+        self.leader_id: Optional[int] = None
+        self.current_word: Optional[str] = None
+        self.previous_word: Optional[str] = None
+        self.is_game_active: bool = False
+        self.word_guessed: bool = False
+        self.round_start_time: Optional[datetime] = None
+        self.timer_task: Optional[asyncio.Task] = None
+        self.warning_sent: bool = False
+
+games: Dict[int, GameState] = {}
+words_list = []
 
 async def get_player_stats_obj(chat_id: int, user_id: int) -> PlayerStats:
     """Получить объект статистики игрока"""
@@ -372,10 +386,8 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         return
     
     game.word_guessed = True
-    
     await cancel_timer(game)
     
-    # Вычисляем время раунда
     round_time = (datetime.now() - game.round_start_time).total_seconds()
     
     # Обновляем статистику угадавшего
@@ -395,25 +407,16 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
             leader_stats.fastest_explain = round_time
         await update_player_stats(chat_id, game.leader_id, leader_stats)
     
-    # Сохраняем статистику
-    save_stats()
-    
     game.is_game_active = False
     
-    logger.info(f"Обрабатываем победу: {winner_name} угадал '{guessed_word}' за {format_time(round_time)}")
-    
-    try:
-        await bot.send_message(
-            chat_id,
-            f"🎉 ПОБЕДА! 🎉\n\n"
-            f"🏆 {winner_name} угадал слово: {guessed_word.upper()}\n"
-            f"⏱️ Время: {format_time(round_time)}\n\n"
-            f"Теперь {winner_name} становится новым ведущим!",
-            reply_markup=get_join_keyboard()
-        )
-        logger.info(f"Сообщение о победе отправлено в чат {chat_id}")
-    except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения о победе: {e}")
+    await bot.send_message(
+        chat_id,
+        f"🎉 ПОБЕДА! 🎉\n\n"
+        f"🏆 {winner_name} угадал слово: {guessed_word.upper()}\n"
+        f"⏱️ Время: {format_time(round_time)}\n\n"
+        f"Теперь {winner_name} становится новым ведущим!",
+        reply_markup=get_join_keyboard()
+    )
     
     game.leader_id = None
     game.current_word = None
