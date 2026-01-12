@@ -508,26 +508,36 @@ async def cmd_rating(message: Message):
         await message.answer("📊 Пока нет статистики. Сыграйте хотя бы один раунд!")
         return
     
-    # Топ по объяснениям
     text = "🏆 РЕЙТИНГ ИГРОКОВ\n\n"
+    
+    # Топ по объяснениям
     text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += "🎭 ТОП ВЕДУЩИХ\n"
+    text += "🎭 ЛИДЕР ПО ОБЪЯСНЕНИЯМ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
-    top_explainers = sorted(players_data, key=lambda x: x['explained'], reverse=True)[:10]
-    for i, player in enumerate(top_explainers, 1):
-        if player['explained'] > 0:
-            text += f"{i}. {player['name']}\n"
+    
+    explainers = [p for p in players_data if p['explained'] > 0]
+    if explainers:
+        max_explained = max(explainers, key=lambda x: x['explained'])['explained']
+        top_explainers = [p for p in explainers if p['explained'] == max_explained]
+        
+        for player in top_explainers:
+            text += f"🏆 {player['name']}\n"
             text += f"   Объяснено: {player['explained']} слов\n"
             text += f"   Среднее: {format_time(player['avg_explain'])}\n"
             text += f"   Лучшее: {format_time(player['fastest_explain'])}\n\n"
     
+    # Топ по угадываниям
     text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += "🎯 ТОП УГАДЫВАЮЩИХ\n"
+    text += "🎯 ЛИДЕР ПО УГАДЫВАНИЮ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
-    top_guessers = sorted(players_data, key=lambda x: x['guessed'], reverse=True)[:10]
-    for i, player in enumerate(top_guessers, 1):
-        if player['guessed'] > 0:
-            text += f"{i}. {player['name']}\n"
+    
+    guessers = [p for p in players_data if p['guessed'] > 0]
+    if guessers:
+        max_guessed = max(guessers, key=lambda x: x['guessed'])['guessed']
+        top_guessers = [p for p in guessers if p['guessed'] == max_guessed]
+        
+        for player in top_guessers:
+            text += f"🏆 {player['name']}\n"
             text += f"   Угадано: {player['guessed']} слов\n"
             text += f"   Среднее: {format_time(player['avg_guess'])}\n"
             text += f"   Лучшее: {format_time(player['fastest_guess'])}\n\n"
@@ -537,32 +547,45 @@ async def cmd_rating(message: Message):
     text += "⚡ РЕКОРДЫ СКОРОСТИ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
     
-    fastest_explainers = [p for p in players_data if p['explained'] > 0]
-    if fastest_explainers:
-        fastest = min(fastest_explainers, key=lambda x: x['avg_explain'])
+    if explainers:
+        # Лучшее среднее объяснение
+        min_avg = min(explainers, key=lambda x: x['avg_explain'])['avg_explain']
+        fastest_avg_explainers = [p for p in explainers if p['avg_explain'] == min_avg]
+        
         text += f"🎭 Среднее объяснение:\n"
-        text += f"   {fastest['name']}\n"
-        text += f"   {format_time(fastest['avg_explain'])}\n\n"
+        for player in fastest_avg_explainers:
+            text += f"   ⚡ {player['name']} - {format_time(player['avg_explain'])}\n"
+        text += "\n"
         
-        fastest_single = min(fastest_explainers, key=lambda x: x['fastest_explain'])
+        # Быстрейшее объяснение
+        min_fastest = min(explainers, key=lambda x: x['fastest_explain'])['fastest_explain']
+        fastest_single_explainers = [p for p in explainers if p['fastest_explain'] == min_fastest]
+        
         text += f"🎭 Быстрейшее объяснение:\n"
-        text += f"   {fastest_single['name']}\n"
-        text += f"   {format_time(fastest_single['fastest_explain'])}\n\n"
+        for player in fastest_single_explainers:
+            text += f"   ⚡ {player['name']} - {format_time(player['fastest_explain'])}\n"
+        text += "\n"
     
-    fastest_guessers = [p for p in players_data if p['guessed'] > 0]
-    if fastest_guessers:
-        fastest = min(fastest_guessers, key=lambda x: x['avg_guess'])
-        text += f"🎯 Среднее угадывание:\n"
-        text += f"   {fastest['name']}\n"
-        text += f"   {format_time(fastest['avg_guess'])}\n\n"
+    if guessers:
+        # Лучшее среднее угадывание
+        min_avg = min(guessers, key=lambda x: x['avg_guess'])['avg_guess']
+        fastest_avg_guessers = [p for p in guessers if p['avg_guess'] == min_avg]
         
-        fastest_single = min(fastest_guessers, key=lambda x: x['fastest_guess'])
+        text += f"🎯 Среднее угадывание:\n"
+        for player in fastest_avg_guessers:
+            text += f"   ⚡ {player['name']} - {format_time(player['avg_guess'])}\n"
+        text += "\n"
+        
+        # Быстрейшее угадывание
+        min_fastest = min(guessers, key=lambda x: x['fastest_guess'])['fastest_guess']
+        fastest_single_guessers = [p for p in guessers if p['fastest_guess'] == min_fastest]
+        
         text += f"🎯 Быстрейшее угадывание:\n"
-        text += f"   {fastest_single['name']}\n"
-        text += f"   {format_time(fastest_single['fastest_guess'])}\n"
+        for player in fastest_single_guessers:
+            text += f"   ⚡ {player['name']} - {format_time(player['fastest_guess'])}\n"
     
     await message.answer(text)
-
+    
 @dp.callback_query(F.data == "join_game")
 async def join_game(callback: CallbackQuery):
     """Обработчик присоединения к игре"""
@@ -798,4 +821,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+
     asyncio.run(main())
