@@ -38,6 +38,10 @@ async def init_db():
     """Инициализация базы данных"""
     global db_pool
     
+    # Отладочный вывод (скрываем пароль)
+    db_url_safe = DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'URL не распознан'
+    logger.info(f"Попытка подключения к БД: ...@{db_url_safe}")
+    
     # Railway PostgreSQL требует SSL, но с verify=False
     try:
         db_pool = await asyncpg.create_pool(
@@ -47,7 +51,7 @@ async def init_db():
             max_size=10,
             command_timeout=60
         )
-        logger.info("Подключение к БД установлено")
+        logger.info("Подключение к БД установлено (с SSL)")
     except Exception as e:
         logger.error(f"Ошибка подключения к БД: {e}")
         # Пробуем без SSL (для локальной разработки)
@@ -923,5 +927,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
