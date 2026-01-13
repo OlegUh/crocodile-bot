@@ -749,15 +749,8 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     await bot.send_message(
         chat_id,
         f"🎉 ПОБЕДА! 🎉\n\n"
-        f"🏆 {winner_name} угадал слово: {guessed_word.upper()}\n"
-        f"⏱️ Время угадывания: {format_time(winner_guess_time)}\n"
-        f"📝 Объяснение: {total_explanation_words} слов{competition_text}\n\n"
-        f"📊 НАГРАДА ПОБЕДИТЕЛЮ:\n"
-        f"   +{exp_gained} опыта\n"
-        f"   {elo_sign}{elo_change} Elo (теперь: {winner_stats.elo_rating})\n"
-        f"   Прогресс: {exp_progress}/{exp_to_next} до уровня {winner_stats.level + 1}"
-        f"{level_up_msg}"
-        f"{leader_reward_text}"
+        f"🏆 {winner_name} угадал: {guessed_word.upper()}\n"
+        f"⏱️ Время: {format_time(winner_guess_time)}"
         f"{abuse_message}\n\n"
         f"Теперь {winner_name} становится новым ведущим!",
         reply_markup=get_join_keyboard()
