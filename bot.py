@@ -798,10 +798,9 @@ async def cmd_start(message: Message):
         )
     else:
         await message.answer(
-            "🎭 Крокодил!\n\n"
-            "• Ведущий принимает дозу\n"
-            "• Остальные угадывают галлюцинации\n"
-            "• \n",
+            "🎭Крокодил!\n\n"
+            "    Ведущий принимает дозу\n"
+            "    Остальные угадывают галлюцинации\n",
             reply_markup=get_join_keyboard()
         )
 
@@ -984,7 +983,7 @@ async def callback_show_word(query: CallbackQuery):
     
     await query.message.edit_text(
         f"🎭 {query.from_user.first_name} увидел слово!\n\n"
-        f"⏱️ Ждем первое объяснение!\n\n"
+        f"⏱️ Ждем объяснение!\n\n"
         f"Остается: 3 минуты",
         reply_markup=None
     )
@@ -1020,7 +1019,7 @@ async def callback_new_word(query: CallbackQuery):
     
     await bot.send_message(
         chat_id,
-        f"🔄 Ведущий взял новое слово! Все попытки сброшены."
+        f"🔄 Ведущий взял новое слово!"
     )
 
 @dp.callback_query(F.data == "end_round")
@@ -1118,3 +1117,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
