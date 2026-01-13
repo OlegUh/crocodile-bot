@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Optional
 from random import choice
 from datetime import datetime
-import asyncpg  # Добавьте в requirements.txt
+import asyncpg
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
@@ -20,12 +20,24 @@ logger = logging.getLogger(__name__)
 
 # Получаем токен и DATABASE_URL из переменных окружения Railway
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway автоматически создаст эту переменную
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Если DATABASE_URL нет, собираем из отдельных переменных
+if not DATABASE_URL:
+    pg_host = os.getenv("PGHOST")
+    pg_port = os.getenv("PGPORT", "5432")
+    pg_db = os.getenv("PGDATABASE")
+    pg_user = os.getenv("PGUSER")
+    pg_pass = os.getenv("PGPASSWORD")
+    
+    if all([pg_host, pg_db, pg_user, pg_pass]):
+        DATABASE_URL = f"postgresql://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
+        logger.info("✅ DATABASE_URL собран из отдельных переменных")
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден!")
+    raise ValueError("❌ BOT_TOKEN не найден! Добавьте в Variables сервиса бота.")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL не найден! Добавьте PostgreSQL в Railway.")
+    raise ValueError("❌ DATABASE_URL не найден! Добавьте DATABASE_URL в Variables сервиса бота.")
 
 WORDS_FILE = "words_dictionary.json"
 ROUND_TIME = 180
@@ -34,7 +46,6 @@ WARNING_TIME = 30
 # Глобальный пул подключений к БД
 db_pool = None
 
-
 async def init_db():
     """Инициализация базы данных"""
     global db_pool
@@ -42,7 +53,6 @@ async def init_db():
     logger.info(f"Подключение к БД...")
     
     try:
-        # Railway автоматически предоставляет правильный DATABASE_URL
         db_pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=1,
@@ -72,7 +82,7 @@ async def init_db():
         logger.error(f"❌ Ошибка подключения к БД: {e}")
         logger.error(f"DATABASE_URL присутствует: {bool(DATABASE_URL)}")
         raise
-        
+
 async def load_player_stats(chat_id: int, user_id: int) -> Dict:
     """Загрузить статистику игрока из БД"""
     async with db_pool.acquire() as conn:
@@ -202,26 +212,6 @@ async def update_player_stats(chat_id: int, user_id: int, stats: PlayerStats):
     """Обновить статистику игрока"""
     await save_player_stats(chat_id, user_id, stats.to_dict())
 
-async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
-    """Получить статистику всех игроков в чате"""
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            'SELECT * FROM player_stats WHERE chat_id = $1',
-            chat_id
-        )
-        
-        result = {}
-        for row in rows:
-            result[row['user_id']] = {
-                'words_explained': row['words_explained'],
-                'words_guessed': row['words_guessed'],
-                'total_explain_time': row['total_explain_time'],
-                'total_guess_time': row['total_guess_time'],
-                'fastest_explain': row['fastest_explain'],
-                'fastest_guess': row['fastest_guess']
-            }
-        return result
-
 def format_time(seconds: float) -> str:
     """Форматировать время в читаемый вид"""
     minutes = int(seconds // 60)
@@ -282,20 +272,11 @@ def get_game_state(chat_id: int) -> GameState:
     return games[chat_id]
 
 def normalize_word(word: str) -> str:
-    """
-    Нормализация слова для сравнения.
-    Приводит к нижнему регистру и заменяет 'ё' на 'е'.
-    """
+    """Нормализация слова для сравнения"""
     return word.lower().replace('ё', 'е')
 
 def is_word_guessed(message_text: str, target_word: str) -> bool:
-    """
-    ЛОКАЛЬНАЯ проверка: содержится ли загаданное слово в тексте сообщения.
-    Все происходит внутри бота, никуда ничего не отправляется.
-    
-    Буква 'ё' в загаданном слове может быть заменена на 'е' в ответе.
-    Пример: слово "трёхмерный" засчитывается как "трехмерный" или "трёхмерный"
-    """
+    """Проверка: содержится ли загаданное слово в тексте сообщения"""
     if not target_word or not message_text:
         return False
     
@@ -349,11 +330,8 @@ async def round_timer(chat_id: int):
             return
         
         word_was = game.current_word
-        
-        # Вычисляем время раунда для неотгаданного слова
         round_time = (datetime.now() - game.round_start_time).total_seconds()
         
-        # Обновляем статистику ведущего (слово не отгадано, но время учитывается)
         if game.leader_id:
             leader_stats = await get_player_stats_obj(chat_id, game.leader_id)
             leader_stats.words_explained += 1
@@ -572,7 +550,6 @@ async def cmd_rating(message: Message):
         await message.answer("📊 Пока нет статистики. Сыграйте хотя бы один раунд!")
         return
     
-    # Собираем данные игроков
     players_data = []
     for user_id, stats_dict in chat_stats.items():
         if stats_dict['words_explained'] > 0 or stats_dict['words_guessed'] > 0:
@@ -599,7 +576,6 @@ async def cmd_rating(message: Message):
     
     text = "🏆 РЕЙТИНГ ИГРОКОВ\n\n"
     
-    # Топ по объяснениям
     text += "━━━━━━━━━━━━━━━━━━━━\n"
     text += "🎭 ЛИДЕР ПО ОБЪЯСНЕНИЯМ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
@@ -615,7 +591,6 @@ async def cmd_rating(message: Message):
             text += f"   Среднее: {format_time(player['avg_explain'])}\n"
             text += f"   Лучшее: {format_time(player['fastest_explain'])}\n\n"
     
-    # Топ по угадываниям
     text += "━━━━━━━━━━━━━━━━━━━━\n"
     text += "🎯 ЛИДЕР ПО УГАДЫВАНИЮ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
@@ -631,13 +606,11 @@ async def cmd_rating(message: Message):
             text += f"   Среднее: {format_time(player['avg_guess'])}\n"
             text += f"   Лучшее: {format_time(player['fastest_guess'])}\n\n"
     
-    # Самые быстрые
     text += "━━━━━━━━━━━━━━━━━━━━\n"
     text += "⚡ РЕКОРДЫ СКОРОСТИ\n"
     text += "━━━━━━━━━━━━━━━━━━━━\n"
     
     if explainers:
-        # Лучшее среднее объяснение
         min_avg = min(explainers, key=lambda x: x['avg_explain'])['avg_explain']
         fastest_avg_explainers = [p for p in explainers if p['avg_explain'] == min_avg]
         
@@ -646,7 +619,6 @@ async def cmd_rating(message: Message):
             text += f"   ⚡ {player['name']} - {format_time(player['avg_explain'])}\n"
         text += "\n"
         
-        # Быстрейшее объяснение
         min_fastest = min(explainers, key=lambda x: x['fastest_explain'])['fastest_explain']
         fastest_single_explainers = [p for p in explainers if p['fastest_explain'] == min_fastest]
         
@@ -656,7 +628,6 @@ async def cmd_rating(message: Message):
         text += "\n"
     
     if guessers:
-        # Лучшее среднее угадывание
         min_avg = min(guessers, key=lambda x: x['avg_guess'])['avg_guess']
         fastest_avg_guessers = [p for p in guessers if p['avg_guess'] == min_avg]
         
@@ -665,7 +636,6 @@ async def cmd_rating(message: Message):
             text += f"   ⚡ {player['name']} - {format_time(player['avg_guess'])}\n"
         text += "\n"
         
-        # Быстрейшее угадывание
         min_fastest = min(guessers, key=lambda x: x['fastest_guess'])['fastest_guess']
         fastest_single_guessers = [p for p in guessers if p['fastest_guess'] == min_fastest]
         
@@ -674,7 +644,7 @@ async def cmd_rating(message: Message):
             text += f"   ⚡ {player['name']} - {format_time(player['fastest_guess'])}\n"
     
     await message.answer(text)
-    
+
 @dp.callback_query(F.data == "join_game")
 async def join_game(callback: CallbackQuery):
     """Обработчик присоединения к игре"""
@@ -847,10 +817,7 @@ async def end_round(callback: CallbackQuery):
 
 @dp.message(F.text)
 async def check_word_guess(message: Message):
-    """
-    ЛОКАЛЬНАЯ проверка сообщений на угаданное слово.
-    Все происходит в памяти бота, ничего никуда не отправляется.
-    """
+    """Проверка сообщений на угаданное слово"""
     try:
         chat_id = message.chat.id
         game = get_game_state(chat_id)
@@ -916,9 +883,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
