@@ -436,6 +436,10 @@ class GameState:
 games: Dict[int, GameState] = {}
 words_list = []
 
+# Для отслеживания запросов на сброс статистики
+# Формат: user_id -> {"chat_id": int, "confirmation_time": datetime, "cancel_task": asyncio.Task}
+reset_requests: Dict[int, Dict] = {}
+
 async def get_player_stats_obj(chat_id: int, user_id: int) -> PlayerStats:
     """Получить объект статистики игрока"""
     data = await load_player_stats(chat_id, user_id)
@@ -472,11 +476,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def get_leader_keyboard():
-    """Клавиатура для ведущего"""
+    """Клавиатура для ведущего с управлением"""
     builder = InlineKeyboardBuilder()
     builder.add(
         InlineKeyboardButton(text="🔍 Показать слово", callback_data="show_word"),
         InlineKeyboardButton(text="🔄 Новое слово", callback_data="new_word"),
+        InlineKeyboardButton(text="📤 Поделиться словом", callback_data="share_word"),
         InlineKeyboardButton(text="✅ Закончить раунд", callback_data="end_round")
     )
     builder.adjust(1)
@@ -781,8 +786,8 @@ async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: st
         f"🎭 {leader_name} теперь ведущий!\n\n"
         f"Ищи норм слово\n\n"
         f"⏱️ У тебя 3 минуты!\n\n"
-        f"Нажми кнопку ниже, чтобы увидеть своё слово:",
-        reply_markup=get_word_keyboard()
+        f"Нажми кнопку ниже, чтобы начать:",
+        reply_markup=get_leader_keyboard()
     )
 
 @dp.message(Command("start"))
@@ -958,35 +963,19 @@ async def callback_show_word(query: CallbackQuery):
         await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    await query.answer()
+    if game.round_start_time is None:
+        await start_round_timer(chat_id)
     
-    # Отправляем слово в личное сообщение
-    try:
-        await bot.send_message(
-            user_id,
-            f"🎭 Твое слово: <b>{game.current_word.upper()}</b>\n\n"
-            f"⏱️ Объясняй! У тебя осталось {ROUND_TIME} секунд!\n\n"
-            f"⚠️ ВАЖНО:\n"
-            f"• Не используй похожие слова (>60% схожести)\n"
-            f"• Объясняй подробно (минимум 4 слова)\n"
-            f"• После твоего первого объяснения начнется конкуренция!",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось отправить слово в ЛС: {e}")
-        await bot.send_message(
-            chat_id,
-            f"⚠️ {query.from_user.first_name}, не могу отправить слово в личку!\n"
-            f"Открой диалог с ботом (@{(await bot.get_me()).username}) и нажми /start"
-        )
-        return
-    
-    await query.message.edit_text(
-        f"🎭 {query.from_user.first_name} увидел слово!\n\n"
-        f"⏱️ Ждем объяснение!\n\n"
-        f"Остается: 3 минуты",
-        reply_markup=None
+    await query.answer(
+        f"🎯 Твоё слово: {game.current_word.upper()}",
+        show_alert=True
     )
+    
+    try:
+        await query.message.edit_reply_markup(reply_markup=get_leader_keyboard())
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"Ошибка при обновлении клавиатуры: {e}")
 
 @dp.callback_query(F.data == "new_word")
 async def callback_new_word(query: CallbackQuery):
@@ -1000,26 +989,42 @@ async def callback_new_word(query: CallbackQuery):
         await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    # Сбрасываем объяснения и конкуренцию
     game.current_word = get_random_word()
-    game.leader_messages = []
-    game.leader_first_message_time = None
-    game.guessing_started = False
-    game.competitors = {}
     
-    await query.answer(f"Новое слово: {game.current_word}", show_alert=True)
+    await start_round_timer(chat_id)
     
-    # Отправляем новое слово
-    await bot.send_message(
-        user_id,
-        f"🎭 Твое новое слово: <b>{game.current_word.upper()}</b>\n\n"
-        f"⚠️ Все попытки угадывания сброшены! Объясняй заново.",
-        parse_mode="HTML"
+    await query.answer(
+        f"🔄 Новое слово: {game.current_word.upper()}\n⏱️ Таймер перезапущен!",
+        show_alert=True
     )
+    
+    logger.info(f"Смена слова: новое слово '{game.current_word}'")
+
+@dp.callback_query(F.data == "share_word")
+async def callback_share_word(query: CallbackQuery):
+    """Поделиться словом в чате и получить новое"""
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    game = get_game_state(chat_id)
+    
+    if game.leader_id != user_id:
+        await query.answer("❌ Ты не ведущий!", show_alert=True)
+        return
+    
+    old_word = game.current_word
+    game.current_word = get_random_word()
+    
+    await start_round_timer(chat_id)
     
     await bot.send_message(
         chat_id,
-        f"🔄 Ведущий взял новое слово!"
+        f"📤 Слово: {old_word.upper()}\n"
+    )
+    
+    await query.answer(
+        f"📤 Слово {old_word.upper()} опубликовано в чате\n"
+        f"🔄 Новое слово: {game.current_word.upper()}",
+        show_alert=True
     )
 
 @dp.callback_query(F.data == "end_round")
@@ -1061,12 +1066,79 @@ async def callback_end_round(query: CallbackQuery):
         reply_markup=get_join_keyboard()
     )
 
+async def reset_stats_timeout(user_id: int, chat_id: int, confirmation_msg_id: int):
+    """Таймер отмены сброса статистики после 15 секунд"""
+    try:
+        await asyncio.sleep(15)
+        
+        # Если за 15 секунд подтверждение не пришло
+        if user_id in reset_requests:
+            del reset_requests[user_id]
+            
+            await bot.send_message(
+                chat_id,
+                "❌ Сброс отменен. Время ожидания подтверждения истекло."
+            )
+            logger.info(f"Сброс статистики отменен для пользователя {user_id} - истекло время")
+    except asyncio.CancelledError:
+        logger.info(f"Таймер сброса статистики отменен для пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка в таймере сброса статистики: {e}")
+
 @dp.message(F.text)
 async def handle_message(message: Message):
     """Обработчик обычных сообщений"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     user_name = message.from_user.first_name
+    message_text = message.text
+    
+    # Обработка запроса на сброс статистики
+    if message_text.lower() == "крокодил сбрось мой рейтинг":
+        # Если уже есть активный запрос на сброс для этого пользователя
+        if user_id in reset_requests:
+            await message.answer("⚠️ У вас уже есть активный запрос на сброс статистики. Подтвердите его или ждите 15 секунд.")
+            return
+        
+        # Создаем новый запрос на сброс
+        confirmation_msg = await message.answer(
+            "🔄 Вы уверены? Напишите СБРОС (соблюдая регистр) для подтверждения.\n"
+            "⏰ У вас есть 15 секунд."
+        )
+        
+        # Запускаем таймер отмены
+        cancel_task = asyncio.create_task(reset_stats_timeout(user_id, chat_id, confirmation_msg.message_id))
+        
+        # Сохраняем запрос
+        reset_requests[user_id] = {
+            "chat_id": chat_id,
+            "confirmation_time": datetime.now(),
+            "cancel_task": cancel_task
+        }
+        
+        logger.info(f"Запрос на сброс статистики для пользователя {user_id} ({user_name})")
+        return
+    
+    # Обработка подтверждения сброса
+    if message_text == "СБРОС" and user_id in reset_requests:
+        request = reset_requests[user_id]
+        
+        # Проверяем что это из того же чата
+        if request["chat_id"] != chat_id:
+            await message.answer("❌ Это не тот чат, в котором вы запросили сброс.")
+            return
+        
+        # Отменяем таймер
+        request["cancel_task"].cancel()
+        del reset_requests[user_id]
+        
+        # Сбрасываем статистику
+        default_stats = PlayerStats()
+        await update_player_stats(chat_id, user_id, default_stats)
+        
+        await message.answer(f"✅ Статистика игрока {user_name} сброшена на начальные значения.")
+        logger.info(f"Статистика пользователя {user_id} ({user_name}) успешно сброшена")
+        return
     
     game = get_game_state(chat_id)
     
@@ -1076,7 +1148,7 @@ async def handle_message(message: Message):
     
     # Если это ведущий - сохраняем его объяснения
     if game.leader_id == user_id:
-        game.leader_messages.append(message.text)
+        game.leader_messages.append(message_text)
         
         # Первое сообщение ведущего - запускаем конкуренцию
         if game.leader_first_message_time is None:
@@ -1091,7 +1163,7 @@ async def handle_message(message: Message):
         return
     
     # Проверяем, является ли это попыткой угадывания (одно слово)
-    if not is_single_word_guess(message.text):
+    if not is_single_word_guess(message_text):
         return
     
     # Регистрируем игрока в конкуренции
@@ -1104,7 +1176,7 @@ async def handle_message(message: Message):
     game.competitors[user_id]['attempts_count'] += 1
     
     # Проверяем, угадано ли слово
-    if is_word_guessed(message.text, game.current_word):
+    if is_word_guessed(message_text, game.current_word):
         await handle_correct_guess(chat_id, user_id, user_name, game.current_word)
 
 async def main():
@@ -1117,4 +1189,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
