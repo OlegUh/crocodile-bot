@@ -193,7 +193,6 @@ class GameState:
     def __init__(self):
         self.leader_id: Optional[int] = None
         self.current_word: Optional[str] = None
-        self.previous_word: Optional[str] = None
         self.is_game_active: bool = False
         self.word_guessed: bool = False
         self.round_start_time: Optional[datetime] = None
@@ -242,7 +241,6 @@ def get_leader_keyboard():
     builder.add(
         InlineKeyboardButton(text="🔍 Показать слово", callback_data="show_word"),
         InlineKeyboardButton(text="🔄 Новое слово", callback_data="new_word"),
-        InlineKeyboardButton(text="⏮️ Предыдущее слово", callback_data="prev_word"),
         InlineKeyboardButton(text="📤 Поделиться словом", callback_data="share_word"),
         InlineKeyboardButton(text="✅ Закончить раунд", callback_data="end_round")
     )
@@ -353,7 +351,6 @@ async def round_timer(chat_id: int):
         
         game.leader_id = None
         game.current_word = None
-        game.previous_word = None
         game.round_start_time = None
         
         logger.info(f"Раунд завершен по таймауту в чате {chat_id}")
@@ -415,7 +412,6 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     game.leader_id = None
     game.current_word = None
-    game.previous_word = None
     game.word_guessed = False
     game.round_start_time = None
 
@@ -426,7 +422,6 @@ async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: st
     game.is_game_active = True
     game.word_guessed = False
     game.current_word = get_random_word()
-    game.previous_word = None
     
     logger.info(f"Новый ведущий: {leader_name}, слово: {game.current_word}")
     
@@ -473,7 +468,6 @@ async def cmd_stop(message: Message):
         game.is_game_active = False
         game.leader_id = None
         game.current_word = None
-        game.previous_word = None
         game.word_guessed = False
         game.round_start_time = None
         await message.answer("🛑 Игра остановлена. Для начала новой игры нажмите /start")
@@ -707,10 +701,9 @@ async def new_word(callback: CallbackQuery):
         await callback.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    game.previous_word = game.current_word
     game.current_word = get_random_word()
     
-    logger.info(f"Смена слова: '{game.previous_word}' -> '{game.current_word}'")
+    logger.info(f"Смена слова на: '{game.current_word}'")
     
     await start_round_timer(chat_id)
     
@@ -718,35 +711,6 @@ async def new_word(callback: CallbackQuery):
         f"🔄 Новое слово: {game.current_word.upper()}\n⏱️ Таймер перезапущен!",
         show_alert=True
     )
-
-@dp.callback_query(F.data == "prev_word")
-async def prev_word(callback: CallbackQuery):
-    """Показать предыдущее слово ведущему"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
-    game = get_game_state(chat_id)
-    
-    if not game.is_game_active:
-        await callback.answer("❌ Игра не активна!", show_alert=True)
-        return
-    
-    if user_id != game.leader_id:
-        await callback.answer("❌ Ты не ведущий!", show_alert=True)
-        return
-    
-    if game.previous_word is None:
-        await callback.answer(
-            f"⏮️ Текущее слово: {game.current_word.upper()}\n\n"
-            f"(Слово еще не менялось)",
-            show_alert=True
-        )
-        logger.info(f"Показано текущее слово (смены не было): {game.current_word}")
-    else:
-        await callback.answer(
-            f"⏮️ Предыдущее слово: {game.previous_word.upper()}",
-            show_alert=True
-        )
-        logger.info(f"Показано предыдущее слово: {game.previous_word}")
 
 @dp.callback_query(F.data == "share_word")
 async def share_word(callback: CallbackQuery):
@@ -764,7 +728,6 @@ async def share_word(callback: CallbackQuery):
         return
     
     old_word = game.current_word
-    game.previous_word = None
     game.current_word = get_random_word()
     
     await start_round_timer(chat_id)
@@ -811,7 +774,6 @@ async def end_round(callback: CallbackQuery):
     
     game.leader_id = None
     game.current_word = None
-    game.previous_word = None
     game.word_guessed = False
     game.round_start_time = None
 
