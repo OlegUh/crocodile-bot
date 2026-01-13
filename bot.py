@@ -432,6 +432,9 @@ class GameState:
         # Для отслеживания попыток угадывания (только после первого сообщения ведущего)
         self.guessing_started: bool = False
         self.competitors: Dict[int, Dict] = {}  # user_id: {first_attempt_time, attempts_count}
+        
+        # Система бана ведущего
+        self.banned_leaders: Dict[int, int] = {}  # user_id -> remaining_games
 
 games: Dict[int, GameState] = {}
 words_list = []
@@ -607,6 +610,12 @@ async def round_timer(chat_id: int):
         game.guessing_started = False
         game.competitors = {}
         
+        # Уменьшаем бан после раунда
+        for uid in list(game.banned_leaders):
+            game.banned_leaders[uid] -= 1
+            if game.banned_leaders[uid] <= 0:
+                del game.banned_leaders[uid]
+        
         logger.info(f"Раунд завершен по таймауту в чате {chat_id}")
         
     except asyncio.CancelledError:
@@ -649,7 +658,6 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     if total_explanation_words <= 3 and game.leader_messages:
         leader_abuse_detected = True
-        abuse_message = "\n⚠️ ПРЕДУПРЕЖДЕНИЕ ВЕДУЩЕМУ: Объяснение слишком короткое (≤3 слов)!"
     
     # Проверяем, использовал ли ведущий похожие слова
     violation_detected = False
@@ -663,10 +671,9 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     winner_stats = await get_player_stats_obj(chat_id, winner_id)
     
     # Время угадывания с момента первой попытки
-    winner_guess_time = round_time
-    if winner_id in game.competitors:
-        winner_guess_time = (datetime.now() - game.competitors[winner_id]['first_attempt_time']).total_seconds()
-    
+    winner_guess_time = (
+    datetime.now() - game.leader_first_message_time
+).total_seconds()
     # Определяем позицию (сколько игроков пытались до него)
     position = 1
     competitor_elos = []
@@ -704,6 +711,7 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         
         if leader_stats.fastest_explain is None or round_time < leader_stats.fastest_explain:
             leader_stats.fastest_explain = round_time
+
         
         # Рассчитываем опыт для ведущего
         leader_exp = calculate_leader_exp(round_time, total_explanation_words, True)
@@ -721,12 +729,23 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
             leader_exp = max(5, leader_exp // 3)
             abuse_message += f"\n📉 Опыт ведущего урезан на 66% (нарушение правил)"
         
+        # Проверяем условия для бана
+        if leader_stats.short_explanations >= 3 or leader_stats.violations >= 2:
+            game.banned_leaders[game.leader_id] = 5
+            abuse_message += f"\n\n🚫 ВЕДУЩИЙ ОТСТРАНЕН НА 5 ИГРЫ ЗА НАРУШЕНИЯ!"
+        
         leader_stats.experience += leader_exp
         leader_stats.level = calculate_level_from_exp(leader_stats.experience)
         
         await update_player_stats(chat_id, game.leader_id, leader_stats)
     
     game.is_game_active = False
+    
+    # Уменьшаем бан после раунда
+    for uid in list(game.banned_leaders):
+        game.banned_leaders[uid] -= 1
+        if game.banned_leaders[uid] <= 0:
+            del game.banned_leaders[uid]
     
     # Формируем сообщение о победе
     level_up_msg = ""
@@ -797,8 +816,8 @@ async def cmd_start(message: Message):
     else:
         await message.answer(
             "🎭Крокодил!\n\n"
-            "Ведущий принимает дозу\n"
-            "Остальные угадывают галлюцинации\n",
+            "    Ведущий принимает дозу\n"
+            "    Остальные угадывают галлюцинации\n",
             reply_markup=get_join_keyboard()
         )
 
@@ -933,6 +952,14 @@ async def callback_join_game(query: CallbackQuery):
     user_name = query.from_user.first_name
     
     game = get_game_state(chat_id)
+    
+    # Проверка бана ведущего
+    if user_id in game.banned_leaders:
+        await query.answer(
+            f"🚫 Ты отстранён от роли ведущего ещё на {game.banned_leaders[user_id]} игр",
+            show_alert=True
+        )
+        return
     
     if game.is_game_active and game.leader_id != user_id:
         await query.answer("❌ Игра уже идет. Ждите следующего раунда!", show_alert=False)
@@ -1182,4 +1209,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
