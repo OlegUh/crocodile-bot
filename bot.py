@@ -18,6 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ID администратора (может менять статистику любого игрока)
+ADMIN_USER_ID = 1630073668
+
 # Получаем токен и DATABASE_URL из переменных окружения Railway
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -43,6 +46,18 @@ WORDS_FILE = "words_dictionary.json"
 ROUND_TIME = 180
 WARNING_TIME = 30
 
+# Настройки системы прогресса
+LEVEL_TITLES = {
+    1: "🌱 Новичок",
+    5: "🎯 Любитель", 
+    10: "⚔️ Профи",
+    20: "👑 Мастер",
+    35: "🔥 Эксперт",
+    50: "⭐ Легенда",
+    75: "💎 Гроссмейстер",
+    100: "🏆 Бог Крокодила"
+}
+
 # Глобальный пул подключений к БД
 db_pool = None
 
@@ -61,21 +76,52 @@ async def init_db():
         )
         logger.info("✅ Подключение к БД установлено")
         
-        # Создаём таблицу статистики, если её нет
+        # Создаём таблицу статистики с новыми полями
         async with db_pool.acquire() as conn:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS player_stats (
                     chat_id BIGINT NOT NULL,
                     user_id BIGINT NOT NULL,
+                    username TEXT,
+                    
+                    -- Основные метрики
                     words_explained INTEGER DEFAULT 0,
                     words_guessed INTEGER DEFAULT 0,
                     total_explain_time FLOAT DEFAULT 0.0,
                     total_guess_time FLOAT DEFAULT 0.0,
                     fastest_explain FLOAT,
                     fastest_guess FLOAT,
+                    
+                    -- Новая система прогресса
+                    level INTEGER DEFAULT 1,
+                    experience INTEGER DEFAULT 0,
+                    elo_rating INTEGER DEFAULT 1000,
+                    
+                    -- Метрики качества игры
+                    total_messages_sent INTEGER DEFAULT 0,
+                    spam_attempts INTEGER DEFAULT 0,
+                    
+                    -- Метрики времени
+                    sum_explain_times FLOAT DEFAULT 0.0,
+                    sum_guess_times FLOAT DEFAULT 0.0,
+                    
                     PRIMARY KEY (chat_id, user_id)
                 )
             ''')
+            
+            # Добавляем новые колонки если таблица уже существует
+            try:
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS username TEXT')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 1')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS experience INTEGER DEFAULT 0')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS elo_rating INTEGER DEFAULT 1000')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS total_messages_sent INTEGER DEFAULT 0')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS spam_attempts INTEGER DEFAULT 0')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS sum_explain_times FLOAT DEFAULT 0.0')
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS sum_guess_times FLOAT DEFAULT 0.0')
+            except Exception as e:
+                logger.info(f"Колонки уже существуют или ошибка при добавлении: {e}")
+                
         logger.info("✅ Таблица player_stats готова")
         
     except Exception as e:
@@ -92,22 +138,23 @@ async def load_player_stats(chat_id: int, user_id: int) -> Dict:
         )
         
         if row:
-            return {
-                'words_explained': row['words_explained'],
-                'words_guessed': row['words_guessed'],
-                'total_explain_time': row['total_explain_time'],
-                'total_guess_time': row['total_guess_time'],
-                'fastest_explain': row['fastest_explain'],
-                'fastest_guess': row['fastest_guess']
-            }
+            return dict(row)
         else:
             return {
+                'username': None,
                 'words_explained': 0,
                 'words_guessed': 0,
                 'total_explain_time': 0.0,
                 'total_guess_time': 0.0,
                 'fastest_explain': None,
-                'fastest_guess': None
+                'fastest_guess': None,
+                'level': 1,
+                'experience': 0,
+                'elo_rating': 1000,
+                'total_messages_sent': 0,
+                'spam_attempts': 0,
+                'sum_explain_times': 0.0,
+                'sum_guess_times': 0.0
             }
 
 async def save_player_stats(chat_id: int, user_id: int, stats: Dict):
@@ -115,21 +162,35 @@ async def save_player_stats(chat_id: int, user_id: int, stats: Dict):
     async with db_pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO player_stats 
-                (chat_id, user_id, words_explained, words_guessed, 
-                 total_explain_time, total_guess_time, fastest_explain, fastest_guess)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (chat_id, user_id, username, words_explained, words_guessed, 
+                 total_explain_time, total_guess_time, fastest_explain, fastest_guess,
+                 level, experience, elo_rating, total_messages_sent, spam_attempts,
+                 sum_explain_times, sum_guess_times)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (chat_id, user_id) 
             DO UPDATE SET
-                words_explained = $3,
-                words_guessed = $4,
-                total_explain_time = $5,
-                total_guess_time = $6,
-                fastest_explain = $7,
-                fastest_guess = $8
+                username = $3,
+                words_explained = $4,
+                words_guessed = $5,
+                total_explain_time = $6,
+                total_guess_time = $7,
+                fastest_explain = $8,
+                fastest_guess = $9,
+                level = $10,
+                experience = $11,
+                elo_rating = $12,
+                total_messages_sent = $13,
+                spam_attempts = $14,
+                sum_explain_times = $15,
+                sum_guess_times = $16
         ''', chat_id, user_id, 
+            stats.get('username'),
             stats['words_explained'], stats['words_guessed'],
             stats['total_explain_time'], stats['total_guess_time'],
-            stats['fastest_explain'], stats['fastest_guess']
+            stats['fastest_explain'], stats['fastest_guess'],
+            stats['level'], stats['experience'], stats['elo_rating'],
+            stats['total_messages_sent'], stats['spam_attempts'],
+            stats['sum_explain_times'], stats['sum_guess_times']
         )
 
 async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
@@ -142,32 +203,137 @@ async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
         
         result = {}
         for row in rows:
-            result[row['user_id']] = {
-                'words_explained': row['words_explained'],
-                'words_guessed': row['words_guessed'],
-                'total_explain_time': row['total_explain_time'],
-                'total_guess_time': row['total_guess_time'],
-                'fastest_explain': row['fastest_explain'],
-                'fastest_guess': row['fastest_guess']
-            }
+            result[row['user_id']] = dict(row)
         return result
+
+def get_level_title(level: int) -> str:
+    """Получить титул по уровню"""
+    title = "🌱 Новичок"
+    for lvl, t in sorted(LEVEL_TITLES.items()):
+        if level >= lvl:
+            title = t
+        else:
+            break
+    return title
+
+def calculate_level_from_exp(exp: int) -> int:
+    """Вычислить уровень по опыту (прогрессия усложняется)"""
+    # Формула: level = sqrt(exp / 100)
+    # Уровень 1 = 0 опыта
+    # Уровень 2 = 100 опыта
+    # Уровень 5 = 2500 опыта
+    # Уровень 10 = 10000 опыта
+    # Уровень 50 = 250000 опыта
+    # Уровень 100 = 1000000 опыта
+    import math
+    return max(1, int(math.sqrt(exp / 100)) + 1)
+
+def exp_for_next_level(current_level: int) -> int:
+    """Сколько опыта нужно для следующего уровня"""
+    return ((current_level) ** 2) * 100
+
+def calculate_guess_exp(guess_time: float, messages_count: int) -> int:
+    """
+    Вычислить опыт за угадывание
+    
+    Параметры:
+    - guess_time: время угадывания в секундах
+    - messages_count: количество сообщений от игрока в этом раунде
+    """
+    base_exp = 50  # Базовый опыт за угадывание
+    
+    # Бонус за скорость (чем быстрее, тем больше)
+    if guess_time < 10:
+        speed_bonus = 100
+    elif guess_time < 20:
+        speed_bonus = 50
+    elif guess_time < 30:
+        speed_bonus = 30
+    elif guess_time < 60:
+        speed_bonus = 10
+    else:
+        speed_bonus = 0
+    
+    # Штраф за спам (много сообщений = перебор вариантов)
+    if messages_count == 1:
+        message_bonus = 50  # Угадал с первого раза!
+    elif messages_count <= 3:
+        message_bonus = 20
+    elif messages_count <= 5:
+        message_bonus = 0
+    elif messages_count <= 10:
+        message_bonus = -20
+    else:
+        message_bonus = -50  # Явный спам
+    
+    total_exp = base_exp + speed_bonus + message_bonus
+    return max(10, total_exp)  # Минимум 10 опыта
+
+def calculate_elo_change(winner_elo: int, loser_elo: int, guess_time: float) -> tuple:
+    """
+    Вычислить изменение Elo-рейтинга
+    
+    winner_elo: рейтинг угадавшего
+    loser_elo: средний рейтинг остальных игроков (или ведущего)
+    guess_time: время угадывания
+    
+    Возвращает: (изменение для победителя, базовое изменение)
+    """
+    K = 32  # Коэффициент изменения рейтинга
+    
+    # Ожидаемый результат
+    expected = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
+    
+    # Фактический результат (победа = 1)
+    actual = 1
+    
+    # Бонус за скорость
+    if guess_time < 15:
+        speed_multiplier = 1.5
+    elif guess_time < 30:
+        speed_multiplier = 1.2
+    elif guess_time < 60:
+        speed_multiplier = 1.0
+    else:
+        speed_multiplier = 0.8
+    
+    # Изменение рейтинга
+    change = int(K * (actual - expected) * speed_multiplier)
+    
+    return (change, -change // 2)  # Победитель получает, остальные теряют
 
 class PlayerStats:
     def __init__(self, data: Dict = None):
         if data:
+            self.username = data.get('username')
             self.words_explained = data.get('words_explained', 0)
             self.words_guessed = data.get('words_guessed', 0)
             self.total_explain_time = data.get('total_explain_time', 0.0)
             self.total_guess_time = data.get('total_guess_time', 0.0)
             self.fastest_explain = data.get('fastest_explain')
             self.fastest_guess = data.get('fastest_guess')
+            self.level = data.get('level', 1)
+            self.experience = data.get('experience', 0)
+            self.elo_rating = data.get('elo_rating', 1000)
+            self.total_messages_sent = data.get('total_messages_sent', 0)
+            self.spam_attempts = data.get('spam_attempts', 0)
+            self.sum_explain_times = data.get('sum_explain_times', 0.0)
+            self.sum_guess_times = data.get('sum_guess_times', 0.0)
         else:
+            self.username = None
             self.words_explained = 0
             self.words_guessed = 0
             self.total_explain_time = 0.0
             self.total_guess_time = 0.0
             self.fastest_explain = None
             self.fastest_guess = None
+            self.level = 1
+            self.experience = 0
+            self.elo_rating = 1000
+            self.total_messages_sent = 0
+            self.spam_attempts = 0
+            self.sum_explain_times = 0.0
+            self.sum_guess_times = 0.0
     
     def avg_explain_time(self) -> float:
         if self.words_explained == 0:
@@ -181,12 +347,20 @@ class PlayerStats:
     
     def to_dict(self):
         return {
+            'username': self.username,
             'words_explained': self.words_explained,
             'words_guessed': self.words_guessed,
             'total_explain_time': self.total_explain_time,
             'total_guess_time': self.total_guess_time,
             'fastest_explain': self.fastest_explain,
-            'fastest_guess': self.fastest_guess
+            'fastest_guess': self.fastest_guess,
+            'level': self.level,
+            'experience': self.experience,
+            'elo_rating': self.elo_rating,
+            'total_messages_sent': self.total_messages_sent,
+            'spam_attempts': self.spam_attempts,
+            'sum_explain_times': self.sum_explain_times,
+            'sum_guess_times': self.sum_guess_times
         }
 
 class GameState:
@@ -198,6 +372,9 @@ class GameState:
         self.round_start_time: Optional[datetime] = None
         self.timer_task: Optional[asyncio.Task] = None
         self.warning_sent: bool = False
+        # Для отслеживания сообщений в раунде
+        self.round_messages: Dict[int, int] = {}  # user_id: количество сообщений
+        self.first_message_time: Optional[datetime] = None
 
 games: Dict[int, GameState] = {}
 words_list = []
@@ -213,9 +390,11 @@ async def update_player_stats(chat_id: int, user_id: int, stats: PlayerStats):
 
 def format_time(seconds: float) -> str:
     """Форматировать время в читаемый вид"""
+    if seconds is None:
+        return "—"
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
-    return f"{minutes} минут {secs} секунд"
+    return f"{minutes}м {secs}с"
 
 def load_words():
     """Загрузить слова из файла"""
@@ -330,12 +509,19 @@ async def round_timer(chat_id: int):
         word_was = game.current_word
         round_time = (datetime.now() - game.round_start_time).total_seconds()
         
+        # Обновляем статистику ведущего (слово не отгадано)
         if game.leader_id:
             leader_stats = await get_player_stats_obj(chat_id, game.leader_id)
             leader_stats.words_explained += 1
             leader_stats.total_explain_time += round_time
+            leader_stats.sum_explain_times += round_time
+            
             if leader_stats.fastest_explain is None or round_time < leader_stats.fastest_explain:
                 leader_stats.fastest_explain = round_time
+            
+            # Небольшой штраф к Elo за неотгаданное слово
+            leader_stats.elo_rating = max(0, leader_stats.elo_rating - 5)
+            
             await update_player_stats(chat_id, game.leader_id, leader_stats)
         
         game.is_game_active = False
@@ -352,6 +538,8 @@ async def round_timer(chat_id: int):
         game.leader_id = None
         game.current_word = None
         game.round_start_time = None
+        game.round_messages = {}
+        game.first_message_time = None
         
         logger.info(f"Раунд завершен по таймауту в чате {chat_id}")
         
@@ -367,10 +555,12 @@ async def start_round_timer(chat_id: int):
     
     game.round_start_time = datetime.now()
     game.warning_sent = False
+    game.round_messages = {}
+    game.first_message_time = None
     game.timer_task = asyncio.create_task(round_timer(chat_id))
     logger.info(f"Запущен таймер на {ROUND_TIME} секунд для чата {chat_id}")
 
-async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, guessed_word: str):
+async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, guessed_word: str, messages_count: int):
     """Обработка правильного ответа"""
     game = get_game_state(chat_id)
     
@@ -382,12 +572,51 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     round_time = (datetime.now() - game.round_start_time).total_seconds()
     
-    # Обновляем статистику угадавшего
+    # Получаем статистику победителя
     winner_stats = await get_player_stats_obj(chat_id, winner_id)
+    
+    # Вычисляем опыт и изменение Elo
+    exp_gained = calculate_guess_exp(round_time, messages_count)
+    
+    # Для Elo используем средний рейтинг всех игроков в чате
+    all_stats = await get_chat_stats(chat_id)
+    avg_elo = 1000
+    if len(all_stats) > 1:
+        elos = [s['elo_rating'] for s in all_stats.values() if s['user_id'] != winner_id]
+        avg_elo = sum(elos) // len(elos) if elos else 1000
+    
+    elo_change, _ = calculate_elo_change(winner_stats.elo_rating, avg_elo, round_time)
+    
+    # Обновляем статистику угадавшего
     winner_stats.words_guessed += 1
     winner_stats.total_guess_time += round_time
+    winner_stats.sum_guess_times += round_time
+    winner_stats.total_messages_sent += messages_count
+    
+    if messages_count > 10:
+        winner_stats.spam_attempts += 1
+    
     if winner_stats.fastest_guess is None or round_time < winner_stats.fastest_guess:
         winner_stats.fastest_guess = round_time
+    
+    # Добавляем опыт и обновляем уровень
+    old_level = winner_stats.level
+    winner_stats.experience += exp_gained
+    winner_stats.level = calculate_level_from_exp(winner_stats.experience)
+    
+    # Обновляем Elo
+    winner_stats.elo_rating += elo_change
+    
+    # Антиабьюз: если средняя скорость угадывания < 15 сек - штраф к опыту
+    avg_guess = winner_stats.avg_guess_time()
+    if avg_guess > 0 and avg_guess < 15 and winner_stats.words_guessed > 5:
+        exp_penalty = exp_gained // 3
+        winner_stats.experience = max(0, winner_stats.experience - exp_penalty)
+        winner_stats.level = calculate_level_from_exp(winner_stats.experience)
+        abuse_warning = f"\n⚠️ Антиабьюз: -{exp_penalty} опыта (слишком быстрая средняя скорость)"
+    else:
+        abuse_warning = ""
+    
     await update_player_stats(chat_id, winner_id, winner_stats)
     
     # Обновляем статистику ведущего
@@ -395,17 +624,41 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         leader_stats = await get_player_stats_obj(chat_id, game.leader_id)
         leader_stats.words_explained += 1
         leader_stats.total_explain_time += round_time
+        leader_stats.sum_explain_times += round_time
+        
         if leader_stats.fastest_explain is None or round_time < leader_stats.fastest_explain:
             leader_stats.fastest_explain = round_time
+        
+        # Ведущий НЕ получает бонус за быстрое объяснение, но получает базовый опыт
+        leader_stats.experience += 25  # Фиксированный опыт за роль ведущего
+        leader_stats.level = calculate_level_from_exp(leader_stats.experience)
+        
         await update_player_stats(chat_id, game.leader_id, leader_stats)
     
     game.is_game_active = False
+    
+    # Формируем сообщение о победе
+    level_up_msg = ""
+    if winner_stats.level > old_level:
+        level_up_msg = f"\n\n🎊 УРОВЕНЬ ПОВЫШЕН! {old_level} → {winner_stats.level}\n{get_level_title(winner_stats.level)}"
+    
+    exp_to_next = exp_for_next_level(winner_stats.level)
+    exp_progress = winner_stats.experience - ((winner_stats.level - 1) ** 2) * 100
+    
+    elo_sign = "+" if elo_change >= 0 else ""
     
     await bot.send_message(
         chat_id,
         f"🎉 ПОБЕДА! 🎉\n\n"
         f"🏆 {winner_name} угадал слово: {guessed_word.upper()}\n"
-        f"⏱️ Время: {format_time(round_time)}\n\n"
+        f"⏱️ Время: {format_time(round_time)}\n"
+        f"💬 Сообщений: {messages_count}\n\n"
+        f"📊 НАГРАДА:\n"
+        f"   +{exp_gained} опыта\n"
+        f"   {elo_sign}{elo_change} Elo (теперь: {winner_stats.elo_rating})\n"
+        f"   Прогресс: {exp_progress}/{exp_to_next} до уровня {winner_stats.level + 1}"
+        f"{level_up_msg}"
+        f"{abuse_warning}\n\n"
         f"Теперь {winner_name} становится новым ведущим!",
         reply_markup=get_join_keyboard()
     )
@@ -414,6 +667,8 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     game.current_word = None
     game.word_guessed = False
     game.round_start_time = None
+    game.round_messages = {}
+    game.first_message_time = None
 
 async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: str):
     """Отправить инструкции для ведущего"""
@@ -422,9 +677,8 @@ async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: st
     game.is_game_active = True
     game.word_guessed = False
     game.current_word = get_random_word()
-    
     logger.info(f"Новый ведущий: {leader_name}, слово: {game.current_word}")
-    
+
     await bot.send_message(
         chat_id,
         f"🎭 {leader_name} теперь ведущий!\n\n"
@@ -439,7 +693,6 @@ async def cmd_start(message: Message):
     """Обработчик команды /start"""
     chat_id = message.chat.id
     game = get_game_state(chat_id)
-    
     if game.is_game_active:
         await message.answer(
             "🎭 Игра 'Крокодил' уже идет!\n"
@@ -450,9 +703,13 @@ async def cmd_start(message: Message):
         await message.answer(
             "🎭 Крокодил!\n\n"
             "Правила:\n"
-            "• Ведущий принимает дозу, игроки угадывают галлюцинации\n"
-            "• Как только кто-то напишет загаданное слово - он становится новым ведущим!\n"
-            "• На раунд дается 3 минуты ⏱️",
+            "• Ведущий объясняет слово жестами\n"
+            "• Кто угадает - становится новым ведущим!\n"
+            "• Зарабатывай опыт, повышай уровень и Elo-рейтинг\n\n"
+            "Команды:\n"
+            "/stats - твоя статистика\n"
+            "/rating - рейтинг игроков\n"
+            "/help - помощь",
             reply_markup=get_join_keyboard()
         )
 
@@ -507,341 +764,234 @@ async def cmd_stats(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     user_name = message.from_user.first_name
-    
     stats = await get_player_stats_obj(chat_id, user_id)
-    
-    text = f"📊 Статистика игрока: {user_name}\n\n"
-    
-    if stats.words_explained == 0 and stats.words_guessed == 0:
-        text += "Пока нет данных. Сыграй хотя бы один раунд!"
-    else:
-        if stats.words_explained > 0:
-            text += f"🎭 ОБЪЯСНЕНИЕ СЛОВ:\n"
-            text += f"   • Всего объяснено: {stats.words_explained} слов\n"
-            text += f"   • Среднее время: {format_time(stats.avg_explain_time())}\n"
-            text += f"   • Лучшее время: {format_time(stats.fastest_explain)}\n\n"
-        
-        if stats.words_guessed > 0:
-            text += f"🎯 УГАДЫВАНИЕ СЛОВ:\n"
-            text += f"   • Всего угадано: {stats.words_guessed} слов\n"
-            text += f"   • Среднее время: {format_time(stats.avg_guess_time())}\n"
-            text += f"   • Лучшее время: {format_time(stats.fastest_guess)}\n"
-        
-        if stats.words_explained == 0:
-            text += f"🎭 ОБЪЯСНЕНИЕ СЛОВ:\n"
-            text += f"   Еще не был ведущим\n"
-    
+
+    # Обновляем username если изменился
+    if stats.username != message.from_user.username:
+        stats.username = message.from_user.username
+        await update_player_stats(chat_id, user_id, stats)
+
+    level_title = get_level_title(stats.level)
+    exp_to_next = exp_for_next_level(stats.level)
+    exp_progress = stats.experience - ((stats.level - 1) ** 2) * 100
+
+    text = f"📊 Статистика: {user_name}\n\n"
+
+    text += f"⭐ УРОВЕНЬ: {stats.level} {level_title}\n"
+    text += f"   Опыт: {stats.experience} ({exp_progress}/{exp_to_next} до следующего)\n"
+    text += f"   Elo-рейтинг: {stats.elo_rating}\n\n"
+
+    text += f"🎯 ОСНОВНОЕ:\n"
+    text += f"   Слов объяснено: {stats.words_explained}\n"
+    text += f"   Слов угадано: {stats.words_guessed}\n"
+    text += f"   Всего раундов: {stats.words_explained + stats.words_guessed}\n\n"
+
+    if stats.words_explained > 0:
+        text += f"📢 ОБЪЯСНЕНИЕ:\n"
+        text += f"   Среднее время: {format_time(stats.avg_explain_time())}\n"
+        text += f"   Самое быстрое: {format_time(stats.fastest_explain)}\n\n"
+
+    if stats.words_guessed > 0:
+        text += f"🎪 УГАДЫВАНИЕ:\n"
+        text += f"   Среднее время: {format_time(stats.avg_guess_time())}\n"
+        text += f"   Самое быстрое: {format_time(stats.fastest_guess)}\n"
+        text += f"   Среднее сообщений: {stats.total_messages_sent / stats.words_guessed:.1f}\n"
+        text += f"   Спам-попыток: {stats.spam_attempts}\n\n"
+
+    text += f"⚠️ АНТИАБЬЮЗ:\n"
+    text += f"   Сообщений отправлено: {stats.total_messages_sent}\n"
+    text += f"   Попыток спама: {stats.spam_attempts}\n"
+
     await message.answer(text)
 
 @dp.message(Command("rating"))
 async def cmd_rating(message: Message):
     """Показать рейтинг игроков"""
     chat_id = message.chat.id
+    all_stats = await get_chat_stats(chat_id)
     
-    chat_stats = await get_chat_stats(chat_id)
-    
-    if not chat_stats:
-        await message.answer("📊 Пока нет статистики. Сыграйте хотя бы один раунд!")
+    if not all_stats:
+        await message.answer("❌ В этом чате еще нет игроков")
         return
     
-    players_data = []
-    for user_id, stats_dict in chat_stats.items():
-        if stats_dict['words_explained'] > 0 or stats_dict['words_guessed'] > 0:
-            stats = PlayerStats(stats_dict)
-            try:
-                user = await bot.get_chat(user_id)
-                name = user.first_name
-            except:
-                name = f"Игрок {user_id}"
-            
-            players_data.append({
-                'name': name,
-                'explained': stats.words_explained,
-                'guessed': stats.words_guessed,
-                'avg_explain': stats.avg_explain_time(),
-                'avg_guess': stats.avg_guess_time(),
-                'fastest_explain': stats.fastest_explain,
-                'fastest_guess': stats.fastest_guess
-            })
-    
-    if not players_data:
-        await message.answer("📊 Пока нет статистики. Сыграйте хотя бы один раунд!")
-        return
+    # Сортируем по опыту (уровню)
+    sorted_stats = sorted(all_stats.items(), key=lambda x: x[1]['experience'], reverse=True)
     
     text = "🏆 РЕЙТИНГ ИГРОКОВ\n\n"
     
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += "🎭 ЛИДЕР ПО ОБЪЯСНЕНИЯМ\n"
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    
-    explainers = [p for p in players_data if p['explained'] > 0]
-    if explainers:
-        max_explained = max(explainers, key=lambda x: x['explained'])['explained']
-        top_explainers = [p for p in explainers if p['explained'] == max_explained]
+    for i, (user_id, stats) in enumerate(sorted_stats[:10], 1):
+        level = stats['level']
+        exp = stats['experience']
+        elo = stats['elo_rating']
+        title = get_level_title(level)
         
-        for player in top_explainers:
-            text += f"🏆 {player['name']}\n"
-            text += f"   Объяснено: {player['explained']} слов\n"
-            text += f"   Среднее: {format_time(player['avg_explain'])}\n"
-            text += f"   Лучшее: {format_time(player['fastest_explain'])}\n\n"
-    
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += "🎯 ЛИДЕР ПО УГАДЫВАНИЮ\n"
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    
-    guessers = [p for p in players_data if p['guessed'] > 0]
-    if guessers:
-        max_guessed = max(guessers, key=lambda x: x['guessed'])['guessed']
-        top_guessers = [p for p in guessers if p['guessed'] == max_guessed]
-        
-        for player in top_guessers:
-            text += f"🏆 {player['name']}\n"
-            text += f"   Угадано: {player['guessed']} слов\n"
-            text += f"   Среднее: {format_time(player['avg_guess'])}\n"
-            text += f"   Лучшее: {format_time(player['fastest_guess'])}\n\n"
-    
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += "⚡ РЕКОРДЫ СКОРОСТИ\n"
-    text += "━━━━━━━━━━━━━━━━━━━━\n"
-    
-    if explainers:
-        min_avg = min(explainers, key=lambda x: x['avg_explain'])['avg_explain']
-        fastest_avg_explainers = [p for p in explainers if p['avg_explain'] == min_avg]
-        
-        text += f"🎭 Среднее объяснение:\n"
-        for player in fastest_avg_explainers:
-            text += f"   ⚡ {player['name']} - {format_time(player['avg_explain'])}\n"
-        text += "\n"
-        
-        min_fastest = min(explainers, key=lambda x: x['fastest_explain'])['fastest_explain']
-        fastest_single_explainers = [p for p in explainers if p['fastest_explain'] == min_fastest]
-        
-        text += f"🎭 Быстрейшее объяснение:\n"
-        for player in fastest_single_explainers:
-            text += f"   ⚡ {player['name']} - {format_time(player['fastest_explain'])}\n"
-        text += "\n"
-    
-    if guessers:
-        min_avg = min(guessers, key=lambda x: x['avg_guess'])['avg_guess']
-        fastest_avg_guessers = [p for p in guessers if p['avg_guess'] == min_avg]
-        
-        text += f"🎯 Среднее угадывание:\n"
-        for player in fastest_avg_guessers:
-            text += f"   ⚡ {player['name']} - {format_time(player['avg_guess'])}\n"
-        text += "\n"
-        
-        min_fastest = min(guessers, key=lambda x: x['fastest_guess'])['fastest_guess']
-        fastest_single_guessers = [p for p in guessers if p['fastest_guess'] == min_fastest]
-        
-        text += f"🎯 Быстрейшее угадывание:\n"
-        for player in fastest_single_guessers:
-            text += f"   ⚡ {player['name']} - {format_time(player['fastest_guess'])}\n"
+        text += f"{i}. {title} | Уровень {level} | Elo: {elo}\n"
+        text += f"   Опыт: {exp} | Угадано: {stats['words_guessed']} | Объяснено: {stats['words_explained']}\n\n"
     
     await message.answer(text)
 
 @dp.callback_query(F.data == "join_game")
-async def join_game(callback: CallbackQuery):
+async def callback_join_game(query: CallbackQuery):
     """Обработчик присоединения к игре"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
-    user_name = callback.from_user.first_name
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    user_name = query.from_user.first_name
+    
     game = get_game_state(chat_id)
     
-    if game.is_game_active:
-        await callback.answer("❌ Игра уже идет! Дождитесь окончания раунда.", show_alert=True)
+    if game.is_game_active and game.leader_id != user_id:
+        await query.answer("❌ Игра уже идет. Ждите следующего раунда!", show_alert=False)
         return
     
+    await query.answer()
+    
+    # Становится ведущим
     await send_leader_instructions(chat_id, user_id, user_name)
-    await callback.answer()
+    await start_round_timer(chat_id)
 
 @dp.callback_query(F.data == "show_word")
-async def show_word(callback: CallbackQuery):
+async def callback_show_word(query: CallbackQuery):
     """Показать слово ведущему"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    
     game = get_game_state(chat_id)
     
-    if not game.is_game_active:
-        await callback.answer("❌ Игра не активна!", show_alert=True)
+    if game.leader_id != user_id or not game.is_game_active:
+        await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    if user_id != game.leader_id:
-        await callback.answer("❌ Ты не ведущий!", show_alert=True)
-        return
+    await query.answer()
     
-    if not game.current_word:
-        game.current_word = get_random_word()
-    
-    if game.round_start_time is None:
-        await start_round_timer(chat_id)
-    
-    await callback.answer(
-        f"🎯 Твоё слово: {game.current_word.upper()}",
-        show_alert=True
+    # Отправляем слово в личное сообщение
+    await bot.send_message(
+        user_id,
+        f"🎭 Твое слово: <b>{game.current_word.upper()}</b>\n\n"
+        f"⏱️ Объясняй! У тебя осталось {ROUND_TIME} секунд!",
+        parse_mode="HTML"
     )
     
-    try:
-        await callback.message.edit_reply_markup(reply_markup=get_leader_keyboard())
-    except Exception as e:
-        if "message is not modified" not in str(e):
-            logger.error(f"Ошибка при обновлении клавиатуры: {e}")
+    await query.message.edit_text(
+        f"🎭 {query.from_user.first_name} увидел слово!\n\n"
+        f"⏱️ Игра началась! Объясняй!\n\n"
+        f"Остается: 3 минуты",
+        reply_markup=None
+    )
 
 @dp.callback_query(F.data == "new_word")
-async def new_word(callback: CallbackQuery):
-    """Поменять слово ведущему"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
+async def callback_new_word(query: CallbackQuery):
+    """Выбрать новое слово"""
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    
     game = get_game_state(chat_id)
     
-    if not game.is_game_active:
-        await callback.answer("❌ Игра не активна!", show_alert=True)
-        return
-    
-    if user_id != game.leader_id:
-        await callback.answer("❌ Ты не ведущий!", show_alert=True)
+    if game.leader_id != user_id:
+        await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
     game.current_word = get_random_word()
     
-    logger.info(f"Смена слова на: '{game.current_word}'")
+    await query.answer(f"Новое слово: {game.current_word}", show_alert=True)
     
-    await start_round_timer(chat_id)
-    
-    await callback.answer(
-        f"🔄 Новое слово: {game.current_word.upper()}\n⏱️ Таймер перезапущен!",
-        show_alert=True
+    # Отправляем новое слово
+    await bot.send_message(
+        user_id,
+        f"🎭 Твое новое слово: <b>{game.current_word.upper()}</b>",
+        parse_mode="HTML"
     )
 
 @dp.callback_query(F.data == "share_word")
-async def share_word(callback: CallbackQuery):
-    """Поделиться словом в чате и получить новое"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
+async def callback_share_word(query: CallbackQuery):
+    """Поделиться словом (для проверки)"""
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    
     game = get_game_state(chat_id)
     
-    if not game.is_game_active:
-        await callback.answer("❌ Игра не активна!", show_alert=True)
+    if game.leader_id != user_id:
+        await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    if user_id != game.leader_id:
-        await callback.answer("❌ Ты не ведущий!", show_alert=True)
-        return
+    await query.answer()
     
-    old_word = game.current_word
-    game.current_word = get_random_word()
-    
-    await start_round_timer(chat_id)
-    
-    await bot.send_message(
-        chat_id,
-        f"📤Чекайте слово: {old_word.upper()}\n"
-    )
-    
-    await callback.answer(
-        f"📤 Слово {old_word.upper()} опубликовано в чате\n"
-        f"🔄 Новое слово: {game.current_word.upper()}",
-        show_alert=True
+    # Показываем слово всем (только для администратора или в тестовых целях)
+    await query.message.edit_text(
+        f"🎭 Слово для этого раунда: <b>{game.current_word.upper()}</b>\n\n"
+        f"(Это видит только ведущий и администраторы)",
+        parse_mode="HTML"
     )
 
 @dp.callback_query(F.data == "end_round")
-async def end_round(callback: CallbackQuery):
-    """Завершить раунд"""
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
+async def callback_end_round(query: CallbackQuery):
+    """Закончить раунд"""
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    
     game = get_game_state(chat_id)
     
-    if not game.is_game_active:
-        await callback.answer("❌ Игра не активна!", show_alert=True)
+    if game.leader_id != user_id:
+        await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
-    if user_id != game.leader_id:
-        await callback.answer("❌ Ты не ведущий!", show_alert=True)
+    await query.answer()
+    
+    if not game.is_game_active:
+        await query.message.edit_text("❌ Игра уже закончена")
         return
+    
+    word_was = game.current_word
     
     await cancel_timer(game)
     
     game.is_game_active = False
-    old_leader_name = callback.from_user.first_name
-    word_was = game.current_word
-    
-    await callback.message.edit_text(
-        f"✅ Раунд завершён!\n\n"
-        f"Слово было: {word_was}\n"
-        f"Ведущий: {old_leader_name}\n\n"
-        f"Желающие быть следующим ведущим - жмите кнопку:",
-        reply_markup=get_join_keyboard()
-    )
-    
     game.leader_id = None
     game.current_word = None
     game.word_guessed = False
     game.round_start_time = None
+    game.round_messages = {}
+    game.first_message_time = None
+    
+    await bot.send_message(
+        chat_id,
+        f"🛑 Ведущий закончил раунд!\n\n"
+        f"Слово было: {word_was}\n\n"
+        f"Кто хочет быть следующим ведущим?",
+        reply_markup=get_join_keyboard()
+    )
 
 @dp.message(F.text)
-async def check_word_guess(message: Message):
-    """Проверка сообщений на угаданное слово"""
-    try:
-        chat_id = message.chat.id
-        game = get_game_state(chat_id)
-        
-        logger.info(f"=" * 20)
-        logger.info(f"   Текст: '{message.text}'")
-        logger.info(f"-" * 20)
-        logger.info(f"   Игра активна: {game.is_game_active}")
-        logger.info(f"   Загаданное слово: {game.current_word}")
-        logger.info(f"   ID ведущего: {game.leader_id}")
-        logger.info(f"-" * 20)
-        
-        if not game.is_game_active:
-            logger.info(f"⏸️  Игра не активна - игнорируем")
-            return
-            
-        if not game.current_word:
-            logger.info(f"❌ Нет загаданного слова - игнорируем")
-            return
-            
-        if game.word_guessed:
-            logger.info(f"✅ Слово уже угадано - игнорируем")
-            return
-        
-        if message.from_user.id == game.leader_id:
-            logger.info(f"🎭 Это ведущий - игнорируем его сообщение")
-            return
-        
-        logger.info(f"🔍 ПРОВЕРЯЕМ СЛОВО:")
-        logger.info(f"   Ищем: '{game.current_word}'")
-        logger.info(f"   В сообщении: '{message.text}'")
-        
-        if is_word_guessed(message.text, game.current_word):
-            winner_name = message.from_user.first_name
-            winner_id = message.from_user.id
-            
-            logger.info(f"🎉 СЛОВО УГАДАНО!")
-            logger.info(f"   Победитель: {winner_name}")
-            logger.info(f"=" * 20)
-            
-            await handle_correct_guess(chat_id, winner_id, winner_name, game.current_word)
-        else:
-            logger.info(f"❌ Слово не совпало")
-            logger.info(f"=" * 20)
-            
-    except Exception as e:
-        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
+async def handle_message(message: Message):
+    """Обработчик обычных сообщений"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name
+    
+    game = get_game_state(chat_id)
+    
+    # Если игра не активна или это ведущий - игнорируем
+    if not game.is_game_active or game.leader_id == user_id:
+        return
+    
+    # Отслеживаем сообщения в раунде
+    if user_id not in game.round_messages:
+        game.round_messages[user_id] = 0
+        game.first_message_time = datetime.now()
+    
+    game.round_messages[user_id] += 1
+    
+    # Проверяем, угадано ли слово
+    if is_word_guessed(message.text, game.current_word):
+        messages_count = game.round_messages.get(user_id, 1)
+        await handle_correct_guess(chat_id, user_id, user_name, game.current_word, messages_count)
 
 async def main():
     """Главная функция"""
-    logger.info("Инициализация базы данных...")
     await init_db()
-    
-    logger.info("Загрузка слов...")
     load_words()
     
-    logger.info("Запуск бота...")
+    logger.info("🚀 Бот запущен!")
     await dp.start_polling(bot)
-    
-    # Закрываем пул подключений при остановке
-    if db_pool:
-        await db_pool.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
