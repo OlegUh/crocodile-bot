@@ -47,6 +47,8 @@ if not DATABASE_URL:
 WORDS_FILE = "words_dictionary.json"
 ROUND_TIME = 180
 WARNING_TIME = 30
+# Максимальное количество попыток угадывания от одного игрока за раунд
+MAX_ATTEMPTS_PER_ROUND = 3
 
 # Настройки системы прогресса
 LEVEL_TITLES = {
@@ -523,6 +525,12 @@ def reduce_bans(game: GameState):
         if game.banned_leaders[uid] <= 0:
             del game.banned_leaders[uid]
 
+
+def finalize_round(game: GameState):
+    """Общая логика финализации раунда: вызывается ровно один раз за раунд."""
+    # Сейчас единственная обязанность — уменьшать счетчики банов.
+    reduce_bans(game)
+
 async def cancel_timer(game: GameState):
     """Отменить таймер раунда"""
     if game.timer_task and not game.timer_task.done():
@@ -596,7 +604,7 @@ async def round_timer(chat_id: int):
         game.competitors = {}
         
         # Уменьшаем бан после раунда
-        reduce_bans(game)
+        finalize_round(game)
         
         logger.info(f"Раунд завершен по таймауту в чате {chat_id}")
         
@@ -607,10 +615,17 @@ async def round_timer(chat_id: int):
 async def start_round_timer(chat_id: int):
     """Запустить таймер раунда"""
     game = get_game_state(chat_id)
-    
+    # ВАЖНО: этот метод является единственным местом, где
+    # - устанавливается `game.round_start_time`
+    # - создаётся `game.timer_task`
+    # и где инициализируется состояние, связанное с текущим раундом.
+    # Это гарантирует консистентность жизненного цикла раунда.
+
     await cancel_timer(game)
-    
+
     game.round_start_time = datetime.now()
+    # Флаг `word_guessed` должен быть сброшен при старте нового раунда
+    game.word_guessed = False
     game.warning_sent = False
     game.leader_messages = []
     game.leader_first_message_time = None
@@ -653,8 +668,8 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         
         await update_player_stats(chat_id, leader_id_temp, leader_stats)
         
-        # Уменьшаем бан
-        reduce_bans(game)
+        # Уменьшаем бан (через централизованную финализацию раунда)
+        finalize_round(game)
         
         game.is_game_active = False
         game.current_word = None
@@ -685,10 +700,14 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     # Получаем статистику победителя
     winner_stats = await get_player_stats_obj(chat_id, winner_id)
     
-    # Время угадывания с момента первой попытки игрока
-    winner_guess_time = (
-        datetime.now() - game.competitors[winner_id]['first_attempt_time']
-    ).total_seconds()
+    # Время угадывания: от момента, когда началась конкуренция (первое сообщение ведущего)
+    # Если неизвестно, то возвращаемся к старту раунда
+    start_time = game.leader_first_message_time or game.round_start_time
+    if start_time is None:
+        # На случай непредвидённой ситуации — защита от None
+        start_time = datetime.now()
+
+    winner_guess_time = (datetime.now() - start_time).total_seconds()
     
     # Определяем позицию - считаем по времени первой попытки
     position = 1
@@ -743,8 +762,8 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         
     game.is_game_active = False
     
-    # Уменьшаем бан после раунда (как в round_timer)
-    reduce_bans(game)
+    # Уменьшаем бан после раунда (через finalize_round)
+    finalize_round(game)
     
     # Формируем сообщение о победе
     level_up_msg = ""
@@ -773,6 +792,26 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         f"Теперь {winner_name} становится новым ведущим!"
     )
 
+# Если победитель отстранён от роли ведущего — не назначаем и сбрасываем состояние
+    if winner_id in game.banned_leaders:
+        await bot.send_message(
+            chat_id,
+            f"🚫 {winner_name} угадал слово, но отстранён от роли ведущего ещё на {game.banned_leaders[winner_id]} игр.\n\nКто хочет быть следующим ведущим?",
+            reply_markup=get_join_keyboard()
+        )
+
+        game.is_game_active = False
+        game.leader_id = None
+        game.current_word = None
+        game.word_guessed = False
+        game.round_start_time = None
+        game.leader_messages = []
+        game.leader_first_message_time = None
+        game.guessing_started = False
+        game.competitors = {}
+
+        return
+
     # Назначаем победителя новым ведущим и запускаем следующий раунд
     await send_leader_instructions(chat_id, winner_id, winner_name)
     await start_round_timer(chat_id)
@@ -780,9 +819,11 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
 async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: str):
     """Отправить инструкции для ведущего"""
     game = get_game_state(chat_id)
+    # НЕ МЕНЯТЬ: send_leader_instructions НЕ должна изменять поля, связанные с таймером раунда
+    # (например, `round_start_time` или `timer_task`). За установку/сброс таймера отвечает
+    # исключительно `start_round_timer()` / `cancel_timer()`.
     game.leader_id = leader_id
     game.is_game_active = True
-    game.word_guessed = False
     game.current_word = get_random_word()
     logger.info(f"Новый ведущий: {leader_name}, слово: {game.current_word}")
 
@@ -1206,8 +1247,11 @@ async def handle_message(message: Message):
             'attempts_count': 1
         }
     else:
-        # Увеличиваем количество попыток (простая защита от спама и статистика)
-        game.competitors[user_id]['attempts_count'] = game.competitors[user_id].get('attempts_count', 0) + 1
+        # Простая защита от спама: игнорируем попытки после N раз за раунд
+        attempts = game.competitors[user_id].get('attempts_count', 0)
+        if attempts >= MAX_ATTEMPTS_PER_ROUND:
+            return
+        game.competitors[user_id]['attempts_count'] = attempts + 1
     
     # Проверяем, угадано ли слово
     if is_word_guessed(message_text, game.current_word):
