@@ -931,28 +931,26 @@ async def cmd_rating(message: Message):
         elo = stats.get('elo_rating', 1000)
         title = get_level_title(level)
 
-        # Пытаемся получить отображаемое имя через API чата
+        # Пытаемся получить отображаемое имя через API чата (только имя, без @username)
         display_name = None
         try:
             member = await bot.get_chat_member(chat_id, user_id)
             u = member.user
-            # Склеиваем имя и фамилию если есть
+            # Склеиваем имя и фамилию если есть (не добавляем @username)
             name_parts = []
             if getattr(u, 'first_name', None):
                 name_parts.append(u.first_name)
             if getattr(u, 'last_name', None):
                 name_parts.append(u.last_name)
             display_name = " ".join(name_parts).strip()
-            if getattr(u, 'username', None):
-                # Показываем и @username для ясности
-                display_name = f"{display_name} @{u.username}" if display_name else f"@{u.username}"
         except Exception:
-            # Игнорируем ошибки получения участника (приватный чат, бот не в чате, rate limit и т.п.)
+            # Игнорируем ошибки получения участника
             display_name = None
 
-        # fallback — использовать username из базы или user_id
+        # fallback — использовать имя из базы (если есть) или user_id
         if not display_name:
-            display_name = stats.get('username') or f"User_{user_id}"
+            db_name = stats.get('username')
+            display_name = db_name or f"User_{user_id}"
 
         text += f"{i}. {display_name} — {title} | Уровень {level} | Elo: {elo}\n"
         text += f"   Опыт: {exp} | Угадано: {stats.get('words_guessed', 0)} | Объяснено: {stats.get('words_explained', 0)}\n\n"
