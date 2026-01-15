@@ -44,6 +44,16 @@ ROUND_TIME = 180
 WARNING_TIME = 30
 MAX_ATTEMPTS_PER_ROUND = 3
 LEVEL_EXP_FACTOR = 7.5
+RESET_COMMANDS = {
+    "крокодил сбрось мой рейтинг",
+    "крокодил сбрось мою статистику",
+    "крокодил сбрось статистику",
+    "крокодил сбрось рейтинг",
+    "крокодил сброс статистики",
+    "крокодил сброс рейтинга",
+    "крокодил сброс моей статистики",
+    "крокодил сброс моего рейтинга",
+}
 
 LEVEL_TITLES = {
     1: "🌱",
@@ -209,11 +219,10 @@ def contains_similar_word(text: str, target_word: str, threshold: float = 0.75) 
     return False
 
 def is_single_word_guess(text: str) -> bool:
-    clean_text = re.sub(r'[^\w\s]', '', text)
+    clean_text = re.sub(r'\s+', ' ', text)
     clean_text = clean_text.strip()
-    
     words = clean_text.split()
-    return len(words) == 1 and len(clean_text) > 0
+    return len(clean_text.split()) == 1
 
 def calculate_guess_exp(guess_time: float, position: int, total_competitors: int) -> int:
     base_exp = 40
@@ -421,23 +430,24 @@ def get_game_state(chat_id: int) -> GameState:
 def normalize_word(word: str) -> str:
     return word.lower().replace('ё', 'е')
 
-def is_word_guessed(message_text: str, target_word: str) -> bool:
-    if not target_word or not message_text:
-        return False
-    
-    message_normalized = normalize_word(message_text.strip())
-    target_normalized = normalize_word(target_word.strip())
-    
-    if message_normalized == target_normalized:
-        return True
-    
-    words_in_message = re.findall(r'\b\w+\b', message_normalized)
-    
-    for word in words_in_message:
-        if word == target_normalized:
-            return True
-    
-    return False
+def check_guess(message_text: str, target_word: str):
+    if not message_text or not target_word:
+        return "wrong"
+
+    msg = normalize_word(message_text.strip())
+    tgt = normalize_word(target_word.strip())
+
+    similarity = SequenceMatcher(None, msg, tgt).ratio()
+
+    length_ratio = len(msg) / len(tgt)
+
+    if similarity >= 0.85 and 0.7 <= length_ratio <= 1.3:
+        return "correct"
+
+    if similarity >= 0.75:
+        return "close"
+
+    return "wrong"
 
 def reduce_bans(game: GameState):
     for uid in list(game.banned_leaders):
@@ -556,7 +566,6 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
             violation_detected = True
             break
     
-    # ЕСЛИ НАРУШЕНИЕ - НЕ ЗАСЧИТЫВАЕМ ПОБЕДУ
     if violation_detected and game.leader_id:
         leader_id_temp = game.leader_id
         leader_stats = await get_player_stats_obj(chat_id, leader_id_temp)
@@ -597,8 +606,6 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     winner_stats = await get_player_stats_obj(chat_id, winner_id)
     
-    # Время угадывания: от момента, когда началась конкуренция (первое сообщение ведущего)
-    # Если неизвестно, то возвращаемся к старту раунда
     start_time = game.leader_first_message_time or game.round_start_time
     if start_time is None:
         start_time = datetime.now()
@@ -658,7 +665,7 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
         level_up_msg = f"\n\n🎊 УРОВЕНЬ ПОВЫШЕН! {old_level} → {winner_stats.level}\n{get_level_title(winner_stats.level)}"
     
     exp_to_next = exp_for_next_level(winner_stats.level)
-    exp_progress = stats.experience - ((stats.level - 1) ** 2) * LEVEL_EXP_FACTOR
+    exp_progress = winner_stats.experience - ((winner_stats.level - 1) ** 2) * LEVEL_EXP_FACTOR
     
     elo_sign = "+" if elo_change >= 0 else ""
     
@@ -1019,22 +1026,14 @@ async def reset_stats_timeout(user_id: int, chat_id: int, confirmation_msg_id: i
         logger.error(f"Ошибка в таймере сброса статистики: {e}")
 
 @dp.message(F.text)
-async def handle_message(message: Message):
+async def handle_message(message: Message):    
     chat_id = message.chat.id
     user_id = message.from_user.id
     user_name = message.from_user.first_name
+    if not message.text:
+        return
+
     message_text = message.text
-    
-    RESET_COMMANDS = {
-        "крокодил сбрось мой рейтинг",
-        "крокодил сбрось мою статистику",
-        "крокодил сбрось статистику",
-        "крокодил сбрось рейтинг",
-        "крокодил сброс статистики",
-        "крокодил сброс рейтинга",
-        "крокодил сброс моей статистики",
-        "крокодил сброс моего рейтинга",
-    }
 
     if message_text.lower().strip() in RESET_COMMANDS:
         if user_id in reset_requests:
@@ -1106,11 +1105,14 @@ async def handle_message(message: Message):
             return
         game.competitors[user_id]['attempts_count'] = attempts + 1
     
-    if is_word_guessed(message_text, game.current_word):
+    result = check_guess(message_text, game.current_word)
+
+    if result == "correct":
         await handle_correct_guess(chat_id, user_id, user_name, game.current_word)
+    elif result == "close":
+        await message.reply("🔥Очень близко!")
 
 async def main():
-    """Главная функция"""
     await init_db()
     load_words()
     
