@@ -32,12 +32,12 @@ if not DATABASE_URL:
     
     if all([pg_host, pg_db, pg_user, pg_pass]):
         DATABASE_URL = f"postgresql://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
-        logger.info("✅ DATABASE_URL собран из отдельных переменных")
+        logger.info("✅DATABASE_URL собран из отдельных переменных")
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не найден! Добавьте в Variables сервиса бота.")
+    raise ValueError("❌BOT_TOKEN не найден! Добавьте в Variables сервиса бота.")
 if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL не найден! Добавьте DATABASE_URL в Variables сервиса бота.")
+    raise ValueError("❌DATABASE_URL не найден! Добавьте DATABASE_URL в Variables сервиса бота.")
 
 WORDS_FILE = "words_dictionary.json"
 ROUND_TIME = 180
@@ -59,7 +59,6 @@ LEVEL_TITLES = {
 db_pool = None
 
 async def init_db():
-    """Инициализация базы данных"""
     global db_pool
     
     logger.info(f"Подключение к БД...")
@@ -71,7 +70,7 @@ async def init_db():
             max_size=10,
             command_timeout=60
         )
-        logger.info("✅ Подключение к БД установлено")
+        logger.info("✅Подключение к БД установлено")
         
         async with db_pool.acquire() as conn:
             await conn.execute('''
@@ -97,7 +96,6 @@ async def init_db():
                 )
             ''')
             
-            # Добавляем новые колонки если таблица уже существует
             try:
                 await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS username TEXT')
                 await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 1')
@@ -107,15 +105,14 @@ async def init_db():
             except Exception as e:
                 logger.info(f"Колонки уже существуют или ошибка при добавлении: {e}")
                 
-        logger.info("✅ Таблица player_stats готова")
+        logger.info("✅Таблица player_stats готова")
         
     except Exception as e:
-        logger.error(f"❌ Ошибка подключения к БД: {e}")
+        logger.error(f"❌Ошибка подключения к БД: {e}")
         logger.error(f"DATABASE_URL присутствует: {bool(DATABASE_URL)}")
         raise
 
 async def load_player_stats(chat_id: int, user_id: int) -> Dict:
-    """Загрузить статистику игрока из БД"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             'SELECT * FROM player_stats WHERE chat_id = $1 AND user_id = $2',
@@ -140,7 +137,6 @@ async def load_player_stats(chat_id: int, user_id: int) -> Dict:
             }
 
 async def save_player_stats(chat_id: int, user_id: int, stats: Dict):
-    """Сохранить статистику игрока в БД"""
     async with db_pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO player_stats 
@@ -171,7 +167,6 @@ async def save_player_stats(chat_id: int, user_id: int, stats: Dict):
         )
 
 async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
-    """Получить статистику всех игроков в чате"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             'SELECT * FROM player_stats WHERE chat_id = $1',
@@ -184,8 +179,7 @@ async def get_chat_stats(chat_id: int) -> Dict[int, Dict]:
         return result
 
 def get_level_title(level: int) -> str:
-    """Получить титул по уровню"""
-    title = "🌱 Новичок"
+    title = "🌱Новичок"
     for lvl, t in sorted(LEVEL_TITLES.items()):
         if level >= lvl:
             title = t
@@ -201,11 +195,9 @@ def exp_for_next_level(current_level: int) -> int:
     return (current_level ** 2) * LEVEL_EXP_FACTOR
 
 def word_similarity(word1: str, word2: str) -> float:
-    """Проверить схожесть слов (0.0 - 1.0)"""
     return SequenceMatcher(None, word1.lower(), word2.lower()).ratio()
 
 def contains_similar_word(text: str, target_word: str, threshold: float = 0.75) -> bool:
-    """Проверить, содержит ли текст похожее слово"""
     words = re.findall(r'\b\w+\b', text.lower())
     target = target_word.lower()
     
@@ -217,7 +209,6 @@ def contains_similar_word(text: str, target_word: str, threshold: float = 0.75) 
     return False
 
 def is_single_word_guess(text: str) -> bool:
-    """Проверить, является ли сообщение одним словом (без учета эмодзи)"""
     clean_text = re.sub(r'[^\w\s]', '', text)
     clean_text = clean_text.strip()
     
@@ -225,14 +216,6 @@ def is_single_word_guess(text: str) -> bool:
     return len(words) == 1 and len(clean_text) > 0
 
 def calculate_guess_exp(guess_time: float, position: int, total_competitors: int) -> int:
-    """
-    Вычислить опыт за угадывание
-    
-    Параметры:
-    - guess_time: время угадывания в секундах
-    - position: позиция игрока (1 = первый угадал, 2 = второй и т.д.)
-    - total_competitors: общее количество игроков, пытавшихся угадать
-    """
     base_exp = 40
     
     if guess_time < 10:
@@ -257,14 +240,6 @@ def calculate_guess_exp(guess_time: float, position: int, total_competitors: int
     return max(15, total_exp)
 
 def calculate_leader_exp(round_time: float, total_words_in_explanation: int, was_guessed: bool) -> int:
-    """
-    Вычислить опыт для ведущего
-    
-    Параметры:
-    - round_time: время раунда
-    - total_words_in_explanation: общее количество слов в объяснениях
-    - was_guessed: было ли слово угадано
-    """
     if not was_guessed:
         return 10
     
@@ -283,15 +258,6 @@ def calculate_leader_exp(round_time: float, total_words_in_explanation: int, was
     return max(20, total_exp)
 
 def calculate_elo_change(winner_elo: int, competitors_elos: List[int], guess_time: float) -> int:
-    """
-    Вычислить изменение Elo-рейтинга для победителя
-    
-    winner_elo: рейтинг угадавшего
-    competitors_elos: рейтинги других игроков, которые пытались угадать
-    guess_time: время угадывания
-    
-    Возвращает: изменение рейтинга для победителя
-    """
     if not competitors_elos:
         return 10
     
@@ -395,11 +361,9 @@ async def get_player_stats_obj(chat_id: int, user_id: int) -> PlayerStats:
     return PlayerStats(data)
 
 async def update_player_stats(chat_id: int, user_id: int, stats: PlayerStats):
-    """Обновить статистику игрока"""
     await save_player_stats(chat_id, user_id, stats.to_dict())
 
 def format_time(seconds: float) -> str:
-    """Форматировать время в читаемый вид"""
     if seconds is None:
         return "—"
     minutes = int(seconds // 60)
@@ -407,7 +371,6 @@ def format_time(seconds: float) -> str:
     return f"{minutes}м {secs}с"
 
 def load_words():
-    """Загрузить слова из файла"""
     global words_list
     try:
         with open(WORDS_FILE, 'r', encoding='utf-8') as f:
@@ -425,7 +388,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def get_leader_keyboard():
-    """Клавиатура для ведущего с управлением"""
     builder = InlineKeyboardBuilder()
     builder.add(
         InlineKeyboardButton(text="🔍Показать слово", callback_data="show_word"),
@@ -1099,7 +1061,7 @@ if message_text.lower().strip() in RESET_COMMANDS:
         request = reset_requests[user_id]
         
         if request["chat_id"] != chat_id:
-            await message.answer("❌ Это не тот чат, в котором вы запросили сброс.")
+            await message.answer("❌Это не тот чат, в котором вы запросили сброс")
             return
         
         request["cancel_task"].cancel()
@@ -1108,7 +1070,7 @@ if message_text.lower().strip() in RESET_COMMANDS:
         default_stats = PlayerStats()
         await update_player_stats(chat_id, user_id, default_stats)
         
-        await message.answer(f"✅Статистика игрока {user_name} сброшена на начальные значения.")
+        await message.answer(f"✅Статистика игрока {user_name} сброшена на начальные значения")
         logger.info(f"Статистика пользователя {user_id} ({user_name}) успешно сброшена")
         return
     
@@ -1157,3 +1119,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
