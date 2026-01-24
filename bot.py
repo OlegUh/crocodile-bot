@@ -432,17 +432,18 @@ def get_game_state(chat_id: int) -> GameState:
     return games[chat_id]
 
 def normalize_word(word: str) -> str:
-    """Normalize word: lowercase, replace ё with е, remove punctuation"""
+    """Normalize word: lowercase, replace ё with е, remove punctuation and whitespace"""
     if not word:
         return ""
-    # Remove punctuation and extra whitespace
-    normalized = re.sub(r'[^\w\s]', '', word.strip())
+    # Remove punctuation, then remove all whitespace, then lowercase
+    normalized = re.sub(r'[^\w]', '', word.strip())  # Remove non-word characters (keeps only letters/numbers)
     normalized = normalized.lower().replace('ё', 'е')
     return normalized
 
 def check_guess(message_text: str, target_word: str):
     """Check if guess matches target word. Returns 'correct', 'close', or 'wrong'"""
     if not message_text or not target_word:
+        logger.warning(f"check_guess: пустой message_text или target_word. message_text='{message_text}', target_word='{target_word}'")
         return "wrong"
 
     msg = normalize_word(message_text.strip())
@@ -450,6 +451,7 @@ def check_guess(message_text: str, target_word: str):
     
     # Handle empty strings after normalization
     if not msg or not tgt:
+        logger.warning(f"check_guess: после нормализации пустая строка. Исходные: message_text='{message_text}', target_word='{target_word}'. После нормализации: msg='{msg}', tgt='{tgt}'")
         return "wrong"
     
     # Exact match (after normalization)
@@ -598,7 +600,7 @@ async def start_round_timer(chat_id: int):
     game.timer_task = asyncio.create_task(round_timer(chat_id))
     logger.info(f"Запущен таймер на {ROUND_TIME} секунд для чата {chat_id}")
 
-async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, guessed_word: str):
+async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, guessed_word: str, is_close_match: bool = False):
     game = get_game_state(chat_id)
     
     # Race condition protection: check and set atomically
@@ -607,6 +609,11 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     game.word_guessed = True
     await cancel_timer(game)
+    
+    # Defensive: ensure leader is never in competitors
+    if game.leader_id and game.leader_id in game.competitors:
+        del game.competitors[game.leader_id]
+        logger.warning(f"Removed leader {game.leader_id} from competitors in chat {chat_id}")
     
     # Handle case where round_start_time might be None
     if game.round_start_time is None:
@@ -670,21 +677,29 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     winner_guess_time = (datetime.now() - start_time).total_seconds()
     
     # Calculate position - handle case where winner might not be in competitors yet
+    # Explicitly exclude leader from position calculation
     position = 1
     if winner_id in game.competitors:
         winner_first_attempt = game.competitors[winner_id]['first_attempt_time']
         for user_id, data in game.competitors.items():
-            if user_id != winner_id:
+            # Exclude both winner and leader from position calculation
+            if user_id != winner_id and user_id != game.leader_id:
                 if data['first_attempt_time'] < winner_first_attempt:
                     position += 1
     
     competitor_elos = []
     
+    # Explicitly exclude leader from competitor ELOs
     for user_id, data in game.competitors.items():
-        if user_id != winner_id:
+        if user_id != winner_id and user_id != game.leader_id:
             competitor_elos.append((await get_player_stats_obj(chat_id, user_id)).elo_rating)
     
     exp_gained = calculate_guess_exp(winner_guess_time, position, len(competitor_elos) + 1)
+    
+    # Reduce experience by 33% for close matches (one mistake)
+    if is_close_match:
+        exp_gained = int(exp_gained * 0.67)  # 33% reduction = 67% of original
+    
     elo_change = calculate_elo_change(winner_stats.elo_rating, competitor_elos, winner_guess_time)
     
     old_level = winner_stats.level
@@ -737,11 +752,17 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     elo_text = f"\n📈 Elo: {elo_sign}{elo_change} (новый рейтинг: {winner_stats.elo_rating})"
     exp_text = f"\n⭐ Опыт: +{exp_gained} (всего: {winner_stats.experience})"
     
+    # Add message about reduced experience for close matches
+    reduced_exp_msg = ""
+    if is_close_match:
+        reduced_exp_msg = "\n⚠️ Уменьшенное количество опыта (ответ с ошибкой)"
+    
     await bot.send_message(
         chat_id,
         f"🎉ПОБЕДА!🎉\n\n"
         f"🏆{winner_name} угадал: {guessed_word.upper()}\n"
         f"⏱️Время: {format_time(winner_guess_time)}"
+        f"{reduced_exp_msg}"
         f"{competition_text}"
         f"{exp_text}"
         f"{elo_text}"
@@ -1168,9 +1189,16 @@ async def handle_message(message: Message):
         return
     
     if not game.guessing_started:
+        logger.info(f"Угадывание еще не начато в чате {chat_id}, игнорируем сообщение '{message_text}' от {user_name}")
+        return
+    
+    # Explicitly exclude leader from being counted as competitor
+    if game.leader_id == user_id:
+        logger.info(f"Пользователь {user_name} является ведущим, игнорируем его сообщение '{message_text}'")
         return
     
     if not is_single_word_guess(message_text):
+        logger.info(f"Сообщение '{message_text}' от {user_name} не является одним словом, игнорируем")
         return
     
     # Register competitor and track attempts
@@ -1194,11 +1222,18 @@ async def handle_message(message: Message):
         return
     
     result = check_guess(message_text, game.current_word)
+    
+    # Debug logging for guess attempts
+    logger.info(f"Попытка угадать в чате {chat_id}: пользователь {user_name} ({user_id}) написал '{message_text}', "
+                f"загаданное слово: '{game.current_word}', результат: {result}")
 
     if result == "correct":
-        await handle_correct_guess(chat_id, user_id, user_name, game.current_word)
+        logger.info(f"✅ Правильный ответ! {user_name} угадал '{game.current_word}'")
+        await handle_correct_guess(chat_id, user_id, user_name, game.current_word, is_close_match=False)
     elif result == "close":
-        await message.reply("🔥Очень близко!")
+        # Close match also counts as win, but with reduced experience (33% less)
+        logger.info(f"🔥 Близкий ответ! {user_name} угадал '{game.current_word}' с ошибкой")
+        await handle_correct_guess(chat_id, user_id, user_name, game.current_word, is_close_match=True)
 
 async def main():
     try:
