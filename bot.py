@@ -870,13 +870,20 @@ async def cmd_stats(message: Message):
         await update_player_stats(chat_id, user_id, stats)
 
     level_title = get_level_title(stats.level)
-    exp_to_next = exp_for_next_level(stats.level)
-    exp_progress = stats.experience - ((stats.level - 1) ** 2) * LEVEL_EXP_FACTOR
+    
+    # Calculate exp needed for current level (minimum exp to be at this level)
+    exp_for_current_level = ((stats.level - 1) ** 2) * LEVEL_EXP_FACTOR
+    # Calculate exp needed for next level (minimum exp to be at next level)
+    exp_for_next_level_total = (stats.level ** 2) * LEVEL_EXP_FACTOR
+    # Exp progress within current level
+    exp_progress = stats.experience - exp_for_current_level
+    # Exp needed from current level to next level (the range for current level)
+    exp_needed_for_level = exp_for_next_level_total - exp_for_current_level
 
     text = f"📊Статистика: {user_name}\n\n"
 
     text += f"УРОВЕНЬ: {stats.level} {level_title}\n"
-    text += f"Опыт: {stats.experience} ({exp_progress}/{exp_to_next} до следующего)\n"
+    text += f"Опыт: {stats.experience} ({exp_progress:.0f}/{exp_needed_for_level:.0f} до следующего)\n"
     text += f"Elo-рейтинг: {stats.elo_rating}\n\n"
 
     text += f"🎯ОСНОВНОЕ:\n"
@@ -997,16 +1004,19 @@ async def callback_new_word(query: CallbackQuery):
         await query.answer("❌Ты не ведущий!", show_alert=True)
         return
     
-    game.current_word = get_random_word()
+    # Capture the word immediately before any async operations to avoid race conditions
+    new_word = get_random_word()
+    game.current_word = new_word
     
     await start_round_timer(chat_id)
     
     await query.answer(
-        f"🔄Новое слово: {game.current_word.upper()}\n⏱️Таймер перезапущен!",
+        f"🔄Новое слово: {new_word.upper()}\n⏱️Таймер перезапущен!",
         show_alert=True
     )
     
-    logger.info(f"Смена слова: новое слово '{game.current_word}'")
+    # Log the word we actually set, not game.current_word which might have changed
+    logger.info(f"Смена слова: новое слово '{new_word}'")
 
 @dp.callback_query(F.data == "share_word")
 async def callback_share_word(query: CallbackQuery):
@@ -1018,8 +1028,10 @@ async def callback_share_word(query: CallbackQuery):
         await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
     
+    # Capture words immediately before any async operations to avoid race conditions
     old_word = game.current_word
-    game.current_word = get_random_word()
+    new_word = get_random_word()
+    game.current_word = new_word
     
     await start_round_timer(chat_id)
     
@@ -1030,9 +1042,12 @@ async def callback_share_word(query: CallbackQuery):
     
     await query.answer(
         f"📤Слово {old_word.upper()} опубликовано в чате\n"
-        f"🔄Новое слово: {game.current_word.upper()}",
+        f"🔄Новое слово: {new_word.upper()}",
         show_alert=True
     )
+    
+    # Log the word we actually set, not game.current_word which might have changed
+    logger.info(f"Смена слова: новое слово '{new_word}'")
 
 @dp.callback_query(F.data == "end_round")
 async def callback_end_round(query: CallbackQuery):
