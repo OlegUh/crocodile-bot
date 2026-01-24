@@ -207,7 +207,7 @@ def exp_for_next_level(current_level: int) -> int:
 def word_similarity(word1: str, word2: str) -> float:
     return SequenceMatcher(None, word1.lower(), word2.lower()).ratio()
 
-def contains_similar_word(text: str, target_word: str, threshold: float = 0.75) -> bool:
+def contains_similar_word(text: str, target_word: str, threshold: float = 0.6) -> bool:
     words = re.findall(r'\b\w+\b', text.lower())
     target = target_word.lower()
     
@@ -219,10 +219,14 @@ def contains_similar_word(text: str, target_word: str, threshold: float = 0.75) 
     return False
 
 def is_single_word_guess(text: str) -> bool:
-    clean_text = re.sub(r'\s+', ' ', text)
-    clean_text = clean_text.strip()
+    """Check if message contains only one word (ignoring punctuation)"""
+    if not text:
+        return False
+    # Remove punctuation and normalize whitespace
+    clean_text = re.sub(r'[^\w\s]', '', text)
+    clean_text = re.sub(r'\s+', ' ', clean_text.strip())
     words = clean_text.split()
-    return len(clean_text.split()) == 1
+    return len(words) == 1
 
 def calculate_guess_exp(guess_time: float, position: int, total_competitors: int) -> int:
     base_exp = 40
@@ -428,25 +432,67 @@ def get_game_state(chat_id: int) -> GameState:
     return games[chat_id]
 
 def normalize_word(word: str) -> str:
-    return word.lower().replace('ё', 'е')
+    """Normalize word: lowercase, replace ё with е, remove punctuation"""
+    if not word:
+        return ""
+    # Remove punctuation and extra whitespace
+    normalized = re.sub(r'[^\w\s]', '', word.strip())
+    normalized = normalized.lower().replace('ё', 'е')
+    return normalized
 
 def check_guess(message_text: str, target_word: str):
+    """Check if guess matches target word. Returns 'correct', 'close', or 'wrong'"""
     if not message_text or not target_word:
         return "wrong"
 
     msg = normalize_word(message_text.strip())
     tgt = normalize_word(target_word.strip())
-
-    similarity = SequenceMatcher(None, msg, tgt).ratio()
-
-    length_ratio = len(msg) / len(tgt)
-
-    if similarity >= 0.85 and 0.7 <= length_ratio <= 1.3:
+    
+    # Handle empty strings after normalization
+    if not msg or not tgt:
+        return "wrong"
+    
+    # Exact match (after normalization)
+    if msg == tgt:
         return "correct"
-
+    
+    # Check if one word contains the other (for partial matches)
+    # This handles cases like "кот" vs "котенок" or vice versa
+    if len(msg) >= 3 and len(tgt) >= 3:
+        if msg in tgt or tgt in msg:
+            # If one is contained in the other and they're similar enough
+            min_len = min(len(msg), len(tgt))
+            max_len = max(len(msg), len(tgt))
+            # If the shorter word is at least 70% of the longer, consider it
+            if min_len / max_len >= 0.7:
+                return "correct"
+    
+    # Calculate similarity
+    similarity = SequenceMatcher(None, msg, tgt).ratio()
+    
+    # Calculate length ratio (avoid division by zero)
+    if len(tgt) == 0:
+        return "wrong"
+    
+    length_ratio = len(msg) / len(tgt)
+    
+    # For correct match: high similarity with reasonable length ratio
+    # Made length ratio more flexible for shorter words
+    min_length_ratio = 0.6 if min(len(msg), len(tgt)) >= 5 else 0.5
+    max_length_ratio = 1.5 if min(len(msg), len(tgt)) >= 5 else 2.0
+    
+    if similarity >= 0.85 and min_length_ratio <= length_ratio <= max_length_ratio:
+        return "correct"
+    
+    # For close match: medium similarity
+    # Also check if length ratio is reasonable
     if similarity >= 0.75:
-        return "close"
-
+        # More lenient length ratio for "close" matches
+        close_min_ratio = 0.5
+        close_max_ratio = 2.0
+        if close_min_ratio <= length_ratio <= close_max_ratio:
+            return "close"
+    
     return "wrong"
 
 def reduce_bans(game: GameState):
@@ -492,7 +538,12 @@ async def round_timer(chat_id: int):
             return
         
         word_was = game.current_word
-        round_time = (datetime.now() - game.round_start_time).total_seconds()
+        # Handle case where round_start_time might be None
+        if game.round_start_time is None:
+            logger.warning(f"round_start_time is None in round_timer for chat {chat_id}")
+            round_time = ROUND_TIME
+        else:
+            round_time = (datetime.now() - game.round_start_time).total_seconds()
         
         if game.leader_id:
             leader_stats = await get_player_stats_obj(chat_id, game.leader_id)
@@ -550,11 +601,17 @@ async def start_round_timer(chat_id: int):
 async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, guessed_word: str):
     game = get_game_state(chat_id)
     
+    # Race condition protection: check and set atomically
     if game.word_guessed:
         return
     
     game.word_guessed = True
     await cancel_timer(game)
+    
+    # Handle case where round_start_time might be None
+    if game.round_start_time is None:
+        logger.warning(f"round_start_time is None in handle_correct_guess for chat {chat_id}")
+        game.round_start_time = datetime.now()
     
     round_time = (datetime.now() - game.round_start_time).total_seconds()
     
@@ -597,7 +654,7 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
             chat_id,
             f"⚠️РАУНД НЕ ЗАСЧИТАН!\n\n"
             f"Ведущий использовал похожее слово (нарушение правил)\n"
-            f"Слово было: {guessed_word.upper()}"
+            f"Слово было: {guessed_word.upper()}\n"
             f"{ban_text}\n\n"
             f"Кто хочет быть следующим ведущим?",
             reply_markup=get_join_keyboard()
@@ -612,11 +669,14 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
 
     winner_guess_time = (datetime.now() - start_time).total_seconds()
     
+    # Calculate position - handle case where winner might not be in competitors yet
     position = 1
-    for user_id, data in game.competitors.items():
-        if user_id != winner_id:
-            if data['first_attempt_time'] < game.competitors[winner_id]['first_attempt_time']:
-                position += 1
+    if winner_id in game.competitors:
+        winner_first_attempt = game.competitors[winner_id]['first_attempt_time']
+        for user_id, data in game.competitors.items():
+            if user_id != winner_id:
+                if data['first_attempt_time'] < winner_first_attempt:
+                    position += 1
     
     competitor_elos = []
     
@@ -660,14 +720,10 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     
     finalize_round(game)
     
+    # Build victory message with all relevant info
     level_up_msg = ""
     if winner_stats.level > old_level:
         level_up_msg = f"\n\n🎊 УРОВЕНЬ ПОВЫШЕН! {old_level} → {winner_stats.level}\n{get_level_title(winner_stats.level)}"
-    
-    exp_to_next = exp_for_next_level(winner_stats.level)
-    exp_progress = winner_stats.experience - ((winner_stats.level - 1) ** 2) * LEVEL_EXP_FACTOR
-    
-    elo_sign = "+" if elo_change >= 0 else ""
     
     competition_text = ""
     if len(competitor_elos) > 0:
@@ -677,13 +733,21 @@ async def handle_correct_guess(chat_id: int, winner_id: int, winner_name: str, g
     if leader_exp > 0:
         leader_reward_text = f"\n📢 Ведущий получил: +{leader_exp} опыта"
     
+    elo_sign = "+" if elo_change >= 0 else ""
+    elo_text = f"\n📈 Elo: {elo_sign}{elo_change} (новый рейтинг: {winner_stats.elo_rating})"
+    exp_text = f"\n⭐ Опыт: +{exp_gained} (всего: {winner_stats.experience})"
+    
     await bot.send_message(
         chat_id,
         f"🎉ПОБЕДА!🎉\n\n"
         f"🏆{winner_name} угадал: {guessed_word.upper()}\n"
         f"⏱️Время: {format_time(winner_guess_time)}"
-        f"\n\n"
-        f"{winner_name} становится новым ведущим!"
+        f"{competition_text}"
+        f"{exp_text}"
+        f"{elo_text}"
+        f"{leader_reward_text}"
+        f"{level_up_msg}"
+        f"\n\n{winner_name} становится новым ведущим!"
     )
 
     if winner_id in game.banned_leaders:
@@ -1094,9 +1158,11 @@ async def handle_message(message: Message):
     if not is_single_word_guess(message_text):
         return
     
+    # Register competitor and track attempts
+    current_time = datetime.now()
     if user_id not in game.competitors:
         game.competitors[user_id] = {
-            'first_attempt_time': datetime.now(),
+            'first_attempt_time': current_time,
             'attempts_count': 1
         }
     else:
@@ -1104,6 +1170,13 @@ async def handle_message(message: Message):
         if attempts >= MAX_ATTEMPTS_PER_ROUND:
             return
         game.competitors[user_id]['attempts_count'] = attempts + 1
+        # Update first_attempt_time only if this is truly the first attempt
+        if 'first_attempt_time' not in game.competitors[user_id]:
+            game.competitors[user_id]['first_attempt_time'] = current_time
+    
+    # Double-check word hasn't been guessed (race condition protection)
+    if game.word_guessed:
+        return
     
     result = check_guess(message_text, game.current_word)
 
@@ -1113,11 +1186,22 @@ async def handle_message(message: Message):
         await message.reply("🔥Очень близко!")
 
 async def main():
-    await init_db()
-    load_words()
-    
-    logger.info("🚀 Бот запущен!")
-    await dp.start_polling(bot)
+    try:
+        await init_db()
+        load_words()
+        
+        logger.info("🚀 Бот запущен!")
+        await dp.start_polling(bot)
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал остановки")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+    finally:
+        # Cleanup
+        global db_pool
+        if db_pool:
+            await db_pool.close()
+            logger.info("Соединение с БД закрыто")
 
 if __name__ == "__main__":
     asyncio.run(main())
