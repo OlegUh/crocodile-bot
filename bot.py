@@ -362,6 +362,12 @@ class GameState:
         self.competitors: Dict[int, Dict] = {}
         
         self.banned_leaders: Dict[int, int] = {}
+        
+        # 1 - базовый режим (безлимитная смена слова)
+        # 2 - режим "3 слова за раунд"
+        self.mode: int = 1
+        # Сколько разных слов уже было выдано ведущему в текущем раунде
+        self.words_used_in_round: int = 0
 
 games: Dict[int, GameState] = {}
 words_list = []
@@ -421,6 +427,25 @@ def get_word_keyboard():
     """Клавиатура для показа слова (начальная)"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🔍Показать слово", callback_data="show_word"))
+    return builder.as_markup()
+
+def get_mode_keyboard(current_mode: int):
+    """Клавиатура выбора режима игры"""
+    builder = InlineKeyboardBuilder()
+    
+    text_mode_1 = "🎲 Режим 1: свободное слово"
+    text_mode_2 = "🎯 Режим 2: 3 слова за раунд"
+    
+    if current_mode == 1:
+        text_mode_1 += " ✅"
+    elif current_mode == 2:
+        text_mode_2 += " ✅"
+    
+    builder.add(
+        InlineKeyboardButton(text=text_mode_1, callback_data="set_mode_1"),
+        InlineKeyboardButton(text=text_mode_2, callback_data="set_mode_2"),
+    )
+    builder.adjust(1)
     return builder.as_markup()
 
 def get_random_word() -> str:
@@ -506,6 +531,7 @@ def reduce_bans(game: GameState):
 
 def finalize_round(game: GameState):
     reduce_bans(game)
+    game.words_used_in_round = 0
 
 async def cancel_timer(game: GameState):
     if game.timer_task and not game.timer_task.done():
@@ -799,6 +825,7 @@ async def send_leader_instructions(chat_id: int, leader_id: int, leader_name: st
     game.leader_id = leader_id
     game.is_game_active = True
     game.current_word = get_random_word()
+    game.words_used_in_round = 1
     logger.info(f"Новый ведущий: {leader_name}, слово: {game.current_word}")
 
     await bot.send_message(
@@ -844,6 +871,7 @@ async def cmd_stop(message: Message):
         game.leader_messages = []
         game.guessing_started = False
         game.competitors = {}
+        game.words_used_in_round = 0
         await message.answer("🛑Игра остановлена. Для начала новой игры нажмите /start")
     else:
         await message.answer("❌Игра не активна. Для начала игры нажмите /start")
@@ -869,10 +897,36 @@ async def cmd_help(message: Message):
         "🎯 ПРАВИЛА УГАДЫВАНИЯ:\n"
         "• Считаются только сообщения из ОДНОГО слова\n"
         "• Конкурируют только те, кто писал после первого объяснения ведущего\n\n"
+        "⚙️ РЕЖИМЫ ИГРЫ:\n"
+        "• Режим 1: свободная смена слова\n"
+        "• Режим 2: за один раунд ведущий может получить не более 3 разных слов\n"
+        "  (первое слово и до двух замен)\n"
+        "• Режим меняется командой /mode\n\n"
         "📢 ПРАВИЛА ДЛЯ ВЕДУЩЕГО:\n"
         "• НЕ используйте похожие слова (>60% схожести)\n"
         "• Быть ведущим выгоднее, чем угадывать!\n\n"
         "Удачи!"
+    )
+
+@dp.message(Command("mode"))
+async def cmd_mode(message: Message):
+    """Переключение режима игры для чата"""
+    chat_id = message.chat.id
+    game = get_game_state(chat_id)
+    current_mode = getattr(game, "mode", 1)
+
+    text = (
+        "⚙️Выбор режима игры\n\n"
+        "1️⃣ Режим 1: свободное слово — ведущий может менять слово сколько угодно раз.\n"
+        "2️⃣ Режим 2: 3 слова — за один раунд ведущему даётся не более трёх разных слов:\n"
+        "   первое слово и до двух замен (кнопки 'Новое слово' и 'Поделиться словом').\n\n"
+        "Режим действует для всех следующих раундов в этом чате.\n"
+        "Сменить режим во время уже идущего раунда нельзя."
+    )
+
+    await message.answer(
+        text,
+        reply_markup=get_mode_keyboard(current_mode)
     )
 
 @dp.message(Command("word_count"))
@@ -989,6 +1043,48 @@ async def callback_join_game(query: CallbackQuery):
     await send_leader_instructions(chat_id, user_id, user_name)
     await start_round_timer(chat_id)
 
+@dp.callback_query(F.data == "set_mode_1")
+async def callback_set_mode_1(query: CallbackQuery):
+    """Установить режим 1 (свободная смена слова) для чата"""
+    chat_id = query.message.chat.id
+    game = get_game_state(chat_id)
+
+    if game.is_game_active:
+        await query.answer("❌Режим можно менять только между раундами.", show_alert=True)
+        return
+
+    game.mode = 1
+    game.words_used_in_round = 0
+
+    await query.answer("✅Включён режим 1: свободное слово.", show_alert=False)
+
+    try:
+        await query.message.edit_reply_markup(reply_markup=get_mode_keyboard(game.mode))
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"Ошибка при обновлении клавиатуры режима: {e}")
+
+@dp.callback_query(F.data == "set_mode_2")
+async def callback_set_mode_2(query: CallbackQuery):
+    """Установить режим 2 (3 слова за раунд) для чата"""
+    chat_id = query.message.chat.id
+    game = get_game_state(chat_id)
+
+    if game.is_game_active:
+        await query.answer("❌Режим можно менять только между раундами.", show_alert=True)
+        return
+
+    game.mode = 2
+    game.words_used_in_round = 0
+
+    await query.answer("✅Включён режим 2: 3 слова за раунд.", show_alert=False)
+
+    try:
+        await query.message.edit_reply_markup(reply_markup=get_mode_keyboard(game.mode))
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"Ошибка при обновлении клавиатуры режима: {e}")
+
 @dp.callback_query(F.data == "show_word")
 async def callback_show_word(query: CallbackQuery):
     chat_id = query.message.chat.id
@@ -1024,10 +1120,21 @@ async def callback_new_word(query: CallbackQuery):
     if game.leader_id != user_id:
         await query.answer("❌Ты не ведущий!", show_alert=True)
         return
+
+    # В режиме 2 ограничиваем количество выдаваемых слов за раунд
+    if getattr(game, "mode", 1) == 2:
+        if game.words_used_in_round >= 3:
+            await query.answer(
+                "❌В этом режиме за раунд доступно только 3 разных слова.\n"
+                "Ты уже использовал лимит.",
+                show_alert=True
+            )
+            return
     
     # Capture the word immediately before any async operations to avoid race conditions
     new_word = get_random_word()
     game.current_word = new_word
+    game.words_used_in_round += 1
     
     await start_round_timer(chat_id)
     
@@ -1048,11 +1155,22 @@ async def callback_share_word(query: CallbackQuery):
     if game.leader_id != user_id:
         await query.answer("❌ Ты не ведущий!", show_alert=True)
         return
+
+    # В режиме 2 также считаем публикацию и смену слова в лимит трёх слов
+    if getattr(game, "mode", 1) == 2:
+        if game.words_used_in_round >= 3:
+            await query.answer(
+                "❌В этом режиме за раунд доступно только 3 разных слова.\n"
+                "Ты уже использовал лимит.",
+                show_alert=True
+            )
+            return
     
     # Capture words immediately before any async operations to avoid race conditions
     old_word = game.current_word
     new_word = get_random_word()
     game.current_word = new_word
+    game.words_used_in_round += 1
     
     await start_round_timer(chat_id)
     
@@ -1099,6 +1217,7 @@ async def callback_end_round(query: CallbackQuery):
     game.leader_messages = []
     game.guessing_started = False
     game.competitors = {}
+    game.words_used_in_round = 0
     
     await bot.send_message(
         chat_id,
